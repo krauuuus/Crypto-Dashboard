@@ -1,6 +1,8 @@
 """
-utils.py — Helpers partagés : cache, atomic write, bucket assignment
+utils.py — Helpers partagés : cache, atomic write, bucket assignment, USDT correction
 """
+import datetime
+import json
 import os
 import shutil
 import tempfile
@@ -95,6 +97,8 @@ def compute_bucket_stats(trades_df: pd.DataFrame,
         return _empty_bucket_stats(exchange, asset, year, month)
 
     trades_df = trades_df.copy()
+    # Correction USDT→USD (négligeable en temps normal, matérielle lors des stress events)
+    trades_df["usd_value"] = apply_usdt_correction(trades_df["usd_value"], year, month)
     trades_df["bucket"] = assign_buckets(trades_df["usd_value"])
 
     grp = trades_df.groupby("bucket", observed=False)
@@ -155,6 +159,85 @@ def missing_months(exchange: str, asset: str,
             months.append((y, m))
         current += relativedelta(months=1)
     return months
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Correction du peg USDT/USD
+# quoteQty Binance/Bybit est en USDT, pas USD. Le peg tient à ±0.5% en temps
+# normal, mais peut atteindre -3% lors de stress events (LUNA mai 2022,
+# FTX nov 2022). On corrige pour ne pas classer de gros trades dans le mauvais
+# bucket lors de ces épisodes.
+# Source : CoinGecko API publique (pas de clé requise), cache 30 jours.
+# ══════════════════════════════════════════════════════════════════════════════
+
+_USDT_CACHE_FILE = CACHE_DIR / "usdt_usd_rates.json"
+_USDT_RATES: dict = {}   # {YYYY-MM: float} chargé une seule fois en mémoire
+
+def _load_usdt_cache() -> dict:
+    if _USDT_CACHE_FILE.exists():
+        try:
+            return json.loads(_USDT_CACHE_FILE.read_text())
+        except Exception:
+            pass
+    return {}
+
+def _save_usdt_cache(rates: dict) -> None:
+    _USDT_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _USDT_CACHE_FILE.write_text(json.dumps(rates))
+
+def get_usdt_usd_rate(year: int, month: int) -> float:
+    """
+    Retourne le taux USDT/USD moyen du mois (moyenne des taux journaliers).
+    Cache local JSON pour éviter les appels répétés à CoinGecko.
+    Retourne 1.0 en cas d'échec (peg imparfait vaut mieux que plantage).
+    """
+    global _USDT_RATES
+    if not _USDT_RATES:
+        _USDT_RATES = _load_usdt_cache()
+
+    key = f"{year}-{month:02d}"
+    if key in _USDT_RATES:
+        return _USDT_RATES[key]
+
+    # Ne pas appeler l'API pour le mois en cours (données incomplètes)
+    today = datetime.date.today()
+    if (year, month) >= (today.year, today.month):
+        return 1.0
+
+    try:
+        import urllib.request
+        import calendar as _cal
+        _, last_day = _cal.monthrange(year, month)
+        date_from = f"{year:04d}-{month:02d}-01"
+        date_to   = f"{year:04d}-{month:02d}-{last_day:02d}"
+        # CoinGecko market_chart/range : timestamp Unix en ms
+        ts_from = int(datetime.datetime(year, month, 1).timestamp())
+        ts_to   = int(datetime.datetime(year, month, last_day, 23, 59).timestamp())
+        url = (
+            f"https://api.coingecko.com/api/v3/coins/tether/market_chart/range"
+            f"?vs_currency=usd&from={ts_from}&to={ts_to}"
+        )
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            data = json.loads(resp.read())
+        prices = [p[1] for p in data.get("prices", [])]
+        rate = float(np.mean(prices)) if prices else 1.0
+    except Exception:
+        rate = 1.0
+
+    _USDT_RATES[key] = rate
+    _save_usdt_cache(_USDT_RATES)
+    return rate
+
+def apply_usdt_correction(usd_values: pd.Series, year: int, month: int) -> pd.Series:
+    """
+    Corrige les valeurs USDT → USD pour un mois donné.
+    Si le taux est entre 0.98 et 1.02, la correction est négligeable (<2%)
+    et on la signale juste ; en dehors de cette plage on corrige réellement.
+    """
+    rate = get_usdt_usd_rate(year, month)
+    if abs(rate - 1.0) < 0.001:   # < 0.1% : on skip le calcul
+        return usd_values
+    return usd_values * rate
 
 
 def missing_days(exchange: str, asset: str,
