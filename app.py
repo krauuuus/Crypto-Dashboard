@@ -1,190 +1,379 @@
-"""
+﻿"""
 app.py — Crypto Research Dashboard
-3 onglets : Bucket Analysis | CryptoStability | CBDC Stablecoins
-
-Lancement :
-    python app.py
-    (ou depuis Anaconda Prompt avec l'env finance-dashboard activé)
+Page d'accueil + 4 sections orientées données :
+  Prix & Rendements | Flux de transactions | Stabilité du marché | Banques centrales
 """
 
 import logging
 import dash
-from dash import Dash, html, dcc, Input, Output, State
+from dash import Dash, html, dcc, Input, Output, State, ctx
 import plotly.graph_objects as go
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-app = Dash(
-    __name__,
-    suppress_callback_exceptions=True,
-    title="Crypto Research Dashboard",
-)
+app = Dash(__name__, suppress_callback_exceptions=True, title="Crypto Research")
 
-# ── Palette ───────────────────────────────────────────────────────────────────
+# ── Design tokens ─────────────────────────────────────────────────────────────
 C = {
-    "bg":       "#0f1117",
-    "surface":  "#1a1d27",
-    "border":   "#2a2d3e",
-    "accent":   "#7c6af7",
+    "bg":       "#07080f",
+    "surface":  "#111420",
+    "card":     "#161925",
+    "border":   "#222538",
+    "accent":   "#6366f1",
+    "accent2":  "#8b5cf6",
     "green":    "#22c55e",
     "red":      "#ef4444",
-    "yellow":   "#eab308",
+    "yellow":   "#f59e0b",
+    "cyan":     "#06b6d4",
     "text":     "#e2e8f0",
     "muted":    "#64748b",
+    "muted2":   "#94a3b8",
 }
 
-TAB_STYLE = {
-    "backgroundColor": C["surface"],
-    "color": C["muted"],
-    "border": f"1px solid {C['border']}",
-    "padding": "10px 24px",
-    "fontFamily": "Inter, sans-serif",
-    "fontSize": "14px",
+FONT = "Inter, -apple-system, sans-serif"
+
+# Sections disponibles
+SECTIONS = [
+    {
+        "id":    "prices",
+        "icon":  "",
+        "title": "Prix et rendements",
+        "desc":  "OHLCV daily, log-rendements, volatilite rolling, correlations",
+        "color": C["cyan"],
+        "status": "disponible",
+    },
+    {
+        "id":    "buckets",
+        "icon":  "",
+        "title": "Flux de transactions",
+        "desc":  "Taille des ordres par bucket, retail vs institutionnel, 5 exchanges",
+        "color": C["accent"],
+        "status": "disponible",
+    },
+    {
+        "id":    "stability",
+        "icon":  "",
+        "title": "Stabilite du marche",
+        "desc":  "Facteur latent DFM, choc eGARCH, QR rolling 18 mois, classification FI/FF",
+        "color": C["yellow"],
+        "status": "disponible",
+    },
+    {
+        "id":    "cbdc",
+        "icon":  "",
+        "title": "Banques centrales",
+        "desc":  "Discours BIS, sentiment CBDC, stance, donnees Artemis",
+        "color": C["green"],
+        "status": "bientot",
+    },
+]
+
+STATUS_STYLE = {
+    "disponible": {"bg": "#16201a", "color": C["green"],  "label": "Disponible"},
+    "bientot":    {"bg": "#1c1a10", "color": C["yellow"], "label": "Bientot"},
+    "calcul":     {"bg": "#1a1530", "color": C["accent"], "label": "En calcul"},
 }
-TAB_SELECTED = {
-    **TAB_STYLE,
-    "color": C["text"],
-    "borderBottom": f"2px solid {C['accent']}",
-    "backgroundColor": C["bg"],
-}
-CARD = {
-    "backgroundColor": C["surface"],
-    "border": f"1px solid {C['border']}",
-    "borderRadius": "8px",
-    "padding": "20px",
-    "marginBottom": "16px",
-}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Helpers UI
+# ══════════════════════════════════════════════════════════════════════════════
+
+def card_stat(label, value, color=None):
+    return html.Div(style={
+        "backgroundColor": C["card"], "border": f"1px solid {C['border']}",
+        "borderRadius": "8px", "padding": "16px 20px", "minWidth": "140px",
+    }, children=[
+        html.P(label, style={"margin": 0, "fontSize": "11px", "color": C["muted"],
+                              "textTransform": "uppercase", "letterSpacing": "0.05em"}),
+        html.P(value, style={"margin": "4px 0 0 0", "fontSize": "22px",
+                              "fontWeight": "700", "color": color or C["text"]}),
+    ])
+
+
+def section_header(title, icon="", on_back=True):
+    back = html.Button("Accueil", id="btn-back", n_clicks=0, style={
+        "background": "none", "border": f"1px solid {C['border']}",
+        "color": C["muted2"], "cursor": "pointer", "padding": "6px 14px",
+        "borderRadius": "6px", "fontSize": "13px", "fontFamily": FONT,
+    }) if on_back else html.Div()
+    return html.Div(style={
+        "display": "flex", "alignItems": "center", "gap": "16px",
+        "marginBottom": "28px", "paddingBottom": "20px",
+        "borderBottom": f"1px solid {C['border']}",
+    }, children=[
+        back,
+        html.Span(icon, style={"fontSize": "24px"}),
+        html.H2(title, style={"margin": 0, "fontSize": "20px", "fontWeight": "600"}),
+    ])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Page d'accueil
+# ══════════════════════════════════════════════════════════════════════════════
+
+def layout_home():
+    cards = []
+    for s in SECTIONS:
+        st = STATUS_STYLE[s["status"]]
+        cards.append(html.Div(
+            id={"type": "nav-card", "section": s["id"]},
+            n_clicks=0,
+            style={
+                "backgroundColor": C["card"],
+                "border": f"1px solid {C['border']}",
+                "borderRadius": "12px",
+                "padding": "28px",
+                "cursor": "pointer" if s["status"] != "bientot" else "default",
+                "transition": "border-color 0.15s",
+                "borderTop": f"3px solid {s['color']}",
+            },
+            children=[
+                html.Div(style={"display": "flex", "justifyContent": "space-between",
+                                "alignItems": "flex-start", "marginBottom": "16px"}, children=[
+                    html.Span(s["icon"], style={"fontSize": "32px"}),
+                    html.Span(st["label"], style={
+                        "backgroundColor": st["bg"], "color": st["color"],
+                        "fontSize": "11px", "padding": "3px 10px",
+                        "borderRadius": "20px", "fontWeight": "500",
+                    }),
+                ]),
+                html.H3(s["title"], style={"margin": "0 0 8px 0", "fontSize": "17px",
+                                            "fontWeight": "600", "color": C["text"]}),
+                html.P(s["desc"], style={"margin": 0, "fontSize": "13px",
+                                          "color": C["muted2"], "lineHeight": "1.6"}),
+            ]
+        ))
+
+    return html.Div([
+        html.Div(style={"marginBottom": "40px"}, children=[
+            html.H1("Crypto Research", style={
+                "margin": "0 0 6px 0", "fontSize": "28px", "fontWeight": "700",
+            }),
+            html.P("Donnees live — Analyses reproductibles",
+                   style={"margin": 0, "color": C["muted2"], "fontSize": "14px"}),
+        ]),
+        html.Div(style={
+            "display": "grid",
+            "gridTemplateColumns": "repeat(auto-fill, minmax(280px, 1fr))",
+            "gap": "20px",
+        }, children=cards),
+    ])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Section Prix & Rendements
+# ══════════════════════════════════════════════════════════════════════════════
+
+def layout_prices():
+    assets = ["BTC", "ETH", "XRP", "BNB", "ADA", "TRX", "DOGE"]
+    return html.Div([
+        section_header("Prix et rendements"),
+        html.Div(style={"display": "flex", "gap": "12px", "marginBottom": "20px",
+                        "flexWrap": "wrap", "alignItems": "center"}, children=[
+            dcc.Dropdown(
+                id="price-asset", options=[{"label": a, "value": a} for a in assets],
+                value="BTC", clearable=False, multi=False,
+                style={"width": "140px", "backgroundColor": C["card"]},
+            ),
+            dcc.RadioItems(
+                id="price-period",
+                options=[
+                    {"label": "1 an",   "value": "1y"},
+                    {"label": "3 ans",  "value": "3y"},
+                    {"label": "Tout",   "value": "all"},
+                ],
+                value="1y",
+                inline=True,
+                style={"color": C["muted2"], "fontSize": "13px"},
+                inputStyle={"marginRight": "4px", "marginLeft": "12px"},
+            ),
+        ]),
+        dcc.Loading(type="circle", color=C["accent"],
+                    children=html.Div(id="price-graphs")),
+    ])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Section Flux de transactions
+# ══════════════════════════════════════════════════════════════════════════════
+
+def layout_buckets():
+    return html.Div([
+        section_header("Flux de transactions"),
+        html.Div(style={"display": "flex", "gap": "12px", "marginBottom": "20px",
+                        "flexWrap": "wrap"}, children=[
+            dcc.Dropdown(
+                id="bucket-asset",
+                options=[{"label": a, "value": a} for a in ["BTC", "ETH", "XRP", "BNB", "LTC"]],
+                value="BTC", clearable=False,
+                style={"width": "120px", "backgroundColor": C["card"]},
+            ),
+            dcc.Dropdown(
+                id="bucket-exchange",
+                options=[
+                    {"label": "Cross-exchange",  "value": "cross_exchange"},
+                    {"label": "Binance",         "value": "binance"},
+                    {"label": "Bybit",           "value": "bybit"},
+                    {"label": "OKX",             "value": "okx"},
+                    {"label": "Kraken",          "value": "kraken"},
+                    {"label": "Coinbase",        "value": "coinbase"},
+                ],
+                value="cross_exchange", clearable=False,
+                style={"width": "180px", "backgroundColor": C["card"]},
+            ),
+        ]),
+        dcc.Loading(type="circle", color=C["accent"],
+                    children=html.Div(id="bucket-graphs")),
+    ])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Section Stabilité du marché
+# ══════════════════════════════════════════════════════════════════════════════
+
+def layout_stability():
+    assets = ["BTC", "ETH", "XRP", "BNB", "ADA", "TRX", "DOGE"]
+    return html.Div([
+        section_header("Stabilite du marche"),
+        html.Div(style={"display": "flex", "gap": "12px", "marginBottom": "20px"}, children=[
+            dcc.Dropdown(
+                id="stab-asset",
+                options=[{"label": a, "value": a} for a in assets],
+                value="BTC", clearable=False,
+                style={"width": "120px", "backgroundColor": C["card"]},
+            ),
+        ]),
+        dcc.Loading(type="circle", color=C["accent"],
+                    children=html.Div(id="stability-graphs")),
+    ])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Layout global
 # ══════════════════════════════════════════════════════════════════════════════
 
-app.layout = html.Div(style={"backgroundColor": C["bg"], "minHeight": "100vh",
-                              "fontFamily": "Inter, sans-serif", "color": C["text"]}, children=[
+app.layout = html.Div(
+    style={"backgroundColor": C["bg"], "minHeight": "100vh",
+           "fontFamily": FONT, "color": C["text"]},
+    children=[
+        dcc.Store(id="current-section", data="home"),
 
-    # Header
-    html.Div(style={"backgroundColor": C["surface"], "borderBottom": f"1px solid {C['border']}",
-                    "padding": "16px 32px", "display": "flex", "alignItems": "center", "gap": "12px"}, children=[
-        html.Div("◈", style={"color": C["accent"], "fontSize": "22px"}),
-        html.H1("Crypto Research Dashboard",
-                style={"margin": 0, "fontSize": "18px", "fontWeight": "600"}),
-        html.Span("live data", style={"backgroundColor": C["accent"], "color": "white",
-                                       "fontSize": "10px", "padding": "2px 8px",
-                                       "borderRadius": "12px", "marginLeft": "8px"}),
-    ]),
-
-    # Onglets
-    dcc.Tabs(id="tabs", value="buckets", style={"backgroundColor": C["surface"]},
-             children=[
-        dcc.Tab(label="📊 Bucket Analysis",    value="buckets",
-                style=TAB_STYLE, selected_style=TAB_SELECTED),
-        dcc.Tab(label="📈 CryptoStability",    value="stability",
-                style=TAB_STYLE, selected_style=TAB_SELECTED),
-        dcc.Tab(label="🏦 CBDC Stablecoins",   value="cbdc",
-                style=TAB_STYLE, selected_style=TAB_SELECTED),
-    ]),
-
-    # Contenu de l'onglet actif
-    html.Div(id="tab-content", style={"padding": "24px 32px"}),
-])
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Onglet 1 : Bucket Analysis
-# ══════════════════════════════════════════════════════════════════════════════
-
-def layout_buckets():
-    return html.Div([
-        html.Div(style={"display": "flex", "gap": "16px", "marginBottom": "16px",
-                        "flexWrap": "wrap"}, children=[
-            html.Div(style={**CARD, "minWidth": "180px"}, children=[
-                dcc.Dropdown(
-                    id="bucket-asset",
-                    options=[{"label": a, "value": a} for a in ["BTC", "ETH", "XRP", "BNB", "LTC"]],
-                    value="BTC",
-                    clearable=False,
-                    style={"backgroundColor": C["bg"], "color": C["text"]},
-                ),
-            ]),
-            html.Div(style={**CARD, "minWidth": "180px"}, children=[
-                dcc.Dropdown(
-                    id="bucket-exchange",
-                    options=[
-                        {"label": "Cross-exchange (agrégé)", "value": "cross_exchange"},
-                        {"label": "Binance", "value": "binance"},
-                        {"label": "Bybit",   "value": "bybit"},
-                        {"label": "OKX",     "value": "okx"},
-                        {"label": "Kraken",  "value": "kraken"},
-                        {"label": "Coinbase","value": "coinbase"},
-                    ],
-                    value="cross_exchange",
-                    clearable=False,
-                    style={"backgroundColor": C["bg"], "color": C["text"]},
-                ),
-            ]),
+        # Barre de navigation top
+        html.Div(style={
+            "backgroundColor": C["surface"],
+            "borderBottom": f"1px solid {C['border']}",
+            "padding": "0 32px",
+            "display": "flex", "alignItems": "center", "height": "52px",
+            "position": "sticky", "top": 0, "zIndex": 100,
+        }, children=[
+            html.Span("Crypto Research", style={"fontWeight": "600", "fontSize": "15px",
+                                                 "color": C["text"]}),
         ]),
 
-        dcc.Loading(type="circle", color=C["accent"], children=[
-            html.Div(id="bucket-graphs"),
-        ]),
-    ])
+        # Contenu principal
+        html.Div(id="page-content",
+                 style={"maxWidth": "1200px", "margin": "0 auto",
+                        "padding": "40px 32px"}),
+    ]
+)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Onglet 2 : CryptoStability
+# Routing : navigation
 # ══════════════════════════════════════════════════════════════════════════════
 
-def layout_stability():
-    return html.Div([
-        html.P(
-            "DFM (PCA r=1) → eGARCH(1,1) → rolling quantile regression (τ = 0.05 / 0.50 / 0.95)",
-            style={"color": C["muted"], "fontSize": "13px", "marginBottom": "16px"}
-        ),
-        dcc.Dropdown(
-            id="stab-asset",
-            options=[{"label": a, "value": a}
-                     for a in ["BTC", "ETH", "XRP", "BNB", "ADA", "TRX", "DOGE"]],
-            value="BTC",
-            clearable=False,
-            style={"backgroundColor": C["bg"], "color": C["text"],
-                   "maxWidth": "200px", "marginBottom": "16px"},
-        ),
-        dcc.Loading(type="circle", color=C["accent"], children=[
-            html.Div(id="stability-graphs"),
-        ]),
-    ])
+@app.callback(
+    Output("current-section", "data"),
+    Input({"type": "nav-card", "section": "prices"},    "n_clicks"),
+    Input({"type": "nav-card", "section": "buckets"},   "n_clicks"),
+    Input({"type": "nav-card", "section": "stability"}, "n_clicks"),
+    Input({"type": "nav-card", "section": "cbdc"},      "n_clicks"),
+    Input("btn-back", "n_clicks"),
+    prevent_initial_call=True,
+)
+def navigate(*_):
+    tid = ctx.triggered_id
+    if tid == "btn-back":
+        return "home"
+    if isinstance(tid, dict):
+        section = tid.get("section", "home")
+        # bloquer la navigation sur "bientot"
+        for s in SECTIONS:
+            if s["id"] == section and s["status"] == "bientot":
+                return dash.no_update
+        return section
+    return "home"
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Onglet 3 : CBDC Stablecoins
-# ══════════════════════════════════════════════════════════════════════════════
-
-def layout_cbdc():
-    return html.Div([
-        html.Div(style=CARD, children=[
-            html.P("Pipeline CBDC Stablecoins à venir.",
-                   style={"color": C["muted"], "margin": 0}),
-            html.P("Sources : BIS speeches + filtre CBDC keywords + Jev classification.",
-                   style={"color": C["muted"], "fontSize": "12px", "margin": "4px 0 0 0"}),
-        ]),
-    ])
+@app.callback(
+    Output("page-content", "children"),
+    Input("current-section", "data"),
+)
+def render_section(section):
+    if section == "prices":    return layout_prices()
+    if section == "buckets":   return layout_buckets()
+    if section == "stability": return layout_stability()
+    return layout_home()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Callback : routing des onglets
+# Données : Prix & Rendements
 # ══════════════════════════════════════════════════════════════════════════════
 
-@app.callback(Output("tab-content", "children"), Input("tabs", "value"))
-def render_tab(tab):
-    if tab == "buckets":   return layout_buckets()
-    if tab == "stability": return layout_stability()
-    if tab == "cbdc":      return layout_cbdc()
-    return html.Div("Onglet inconnu")
+@app.callback(
+    Output("price-graphs", "children"),
+    Input("price-asset", "value"),
+    Input("price-period", "value"),
+)
+def update_prices(asset, period):
+    try:
+        from pipelines.crypto_prices import load_prices
+        import pandas as pd, numpy as np
+        df_all = load_prices()
+        df = df_all[df_all["symbol"] == asset].copy()
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.sort_values("date")
+
+        cutoff = {"1y": 365, "3y": 365*3, "all": 99999}[period]
+        df = df.tail(cutoff)
+
+        df["log_ret"] = np.log(df["close"] / df["close"].shift(1))
+        df["vol_30"]  = df["log_ret"].rolling(30).std() * np.sqrt(252) * 100
+
+        last  = df["close"].iloc[-1]
+        ret1y = (df["close"].iloc[-1] / df["close"].iloc[max(-252, -len(df))]) - 1
+        vol   = df["vol_30"].iloc[-1]
+
+        stats = html.Div(style={"display": "flex", "gap": "12px",
+                                 "marginBottom": "20px", "flexWrap": "wrap"}, children=[
+            card_stat("Dernier prix", f"${last:,.0f}"),
+            card_stat("Rendement 1 an", f"{ret1y:+.1%}",
+                      C["green"] if ret1y > 0 else C["red"]),
+            card_stat("Volatilité ann. 30j", f"{vol:.1f}%", C["yellow"]),
+        ])
+
+        fig_p = go.Figure()
+        fig_p.add_trace(go.Scatter(x=df["date"], y=df["close"], name="Prix",
+                                    line={"color": C["cyan"], "width": 1.5}))
+        fig_p.update_layout(**_fig_layout(f"{asset} — Prix de clôture (USD)", 320))
+
+        fig_v = go.Figure()
+        fig_v.add_trace(go.Scatter(x=df["date"], y=df["vol_30"],
+                                    name="Vol. réalisée 30j (ann.)",
+                                    line={"color": C["yellow"], "width": 1.5},
+                                    fill="tozeroy", fillcolor="rgba(245,158,11,0.08)"))
+        fig_v.update_layout(**_fig_layout(f"{asset} — Volatilité annualisée 30j (%)", 240))
+
+        return html.Div([stats, dcc.Graph(figure=fig_p), dcc.Graph(figure=fig_v)])
+
+    except Exception as e:
+        return _error(f"Erreur chargement prix : {e}",
+                      "Lance d'abord : python -m pipelines.crypto_prices")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Callback : Bucket Analysis — graphiques
+# Données : Bucket Analysis
 # ══════════════════════════════════════════════════════════════════════════════
 
 @app.callback(
@@ -197,33 +386,28 @@ def update_buckets(asset, exchange):
     import pandas as pd
 
     MONTHLY_DIR = Path(__file__).parent / "data" / "raw" / "buckets" / "monthly"
-
-    if exchange == "cross_exchange":
-        base = MONTHLY_DIR / "aggregated" / asset
-    else:
-        base = MONTHLY_DIR / exchange / asset
-
+    base = (MONTHLY_DIR / "aggregated" / asset if exchange == "cross_exchange"
+            else MONTHLY_DIR / exchange / asset)
     parquets = sorted(base.glob("*.parquet")) if base.exists() else []
 
     if not parquets:
-        return html.Div(
-            f"Aucune donnée disponible pour {asset} / {exchange}. "
-            "Lance d'abord le pipeline bucket.",
-            style={"color": C["muted"], "padding": "40px", "textAlign": "center"}
+        return _info(
+            f"Aucune donnée pour {asset} / {exchange}.",
+            "Le pipeline bucket est en cours ou n'a pas encore été lancé."
         )
 
     df = pd.concat([pd.read_parquet(p) for p in parquets], ignore_index=True)
-    df["year_month"] = df["year"].astype(str) + "-" + df["month"].astype(str).str.zfill(2)
-    df = df.sort_values("year_month")
+    df["ym"] = df["year"].astype(str) + "-" + df["month"].astype(str).str.zfill(2)
+    df = df.sort_values("ym")
 
-    bucket_colors = {
+    COLORS = {
         "B1_micro_retail":  "#64748b",
         "B2_retail":        "#3b82f6",
         "B3_semi_inst":     "#8b5cf6",
-        "B4_institutional": "#f59e0b",
-        "B5_whale":         "#ef4444",
+        "B4_institutional": C["yellow"],
+        "B5_whale":         C["red"],
     }
-    bucket_labels = {
+    LABELS = {
         "B1_micro_retail":  "< $1K",
         "B2_retail":        "$1K–$10K",
         "B3_semi_inst":     "$10K–$100K",
@@ -231,53 +415,42 @@ def update_buckets(asset, exchange):
         "B5_whale":         "> $1M",
     }
 
-    # Graphique 1 : parts de volume par bucket (stacked bar)
-    fig_vol = go.Figure()
-    for bucket, color in bucket_colors.items():
-        sub = df[df["bucket"] == bucket]
-        fig_vol.add_trace(go.Bar(
-            x=sub["year_month"],
-            y=sub["volume_share_pct"],
-            name=bucket_labels.get(bucket, bucket),
-            marker_color=color,
-        ))
-    fig_vol.update_layout(
-        barmode="stack",
-        title=f"{asset} — Part de volume par bucket ({exchange})",
-        template="plotly_dark",
-        paper_bgcolor=C["surface"],
-        plot_bgcolor=C["surface"],
-        legend=dict(orientation="h", y=-0.2),
-        yaxis_title="% du volume total",
-        height=400,
-    )
+    # Stats dernière période disponible
+    last_ym   = df["ym"].max()
+    last_data = df[df["ym"] == last_ym]
+    whale_pct = last_data[last_data["bucket"] == "B5_whale"]["volume_share_pct"].sum()
+    inst_pct  = last_data[last_data["bucket"].isin(["B4_institutional", "B5_whale"])]["volume_share_pct"].sum()
+    retail_pct = last_data[last_data["bucket"].isin(["B1_micro_retail", "B2_retail"])]["volume_share_pct"].sum()
 
-    # Graphique 2 : nombre de trades par bucket
-    fig_cnt = go.Figure()
-    for bucket, color in bucket_colors.items():
-        sub = df[df["bucket"] == bucket]
-        fig_cnt.add_trace(go.Bar(
-            x=sub["year_month"],
-            y=sub["count_share_pct"],
-            name=bucket_labels.get(bucket, bucket),
-            marker_color=color,
-            showlegend=False,
-        ))
-    fig_cnt.update_layout(
-        barmode="stack",
-        title=f"{asset} — Part du nombre de trades par bucket ({exchange})",
-        template="plotly_dark",
-        paper_bgcolor=C["surface"],
-        plot_bgcolor=C["surface"],
-        yaxis_title="% du nombre de trades",
-        height=350,
-    )
+    stats = html.Div(style={"display": "flex", "gap": "12px",
+                             "marginBottom": "20px", "flexWrap": "wrap"}, children=[
+        card_stat(f"Whale (>{1}M$)", f"{whale_pct:.1f}%", C["red"]),
+        card_stat("Institutionnel+", f"{inst_pct:.1f}%", C["yellow"]),
+        card_stat("Retail (<$10K)",  f"{retail_pct:.1f}%", C["cyan"]),
+        card_stat("Période",         last_ym, C["muted2"]),
+    ])
 
-    return html.Div([dcc.Graph(figure=fig_vol), dcc.Graph(figure=fig_cnt)])
+    fig_v = go.Figure()
+    fig_c = go.Figure()
+    for b, color in COLORS.items():
+        sub = df[df["bucket"] == b]
+        lbl = LABELS.get(b, b)
+        fig_v.add_trace(go.Bar(x=sub["ym"], y=sub["volume_share_pct"],
+                                name=lbl, marker_color=color))
+        fig_c.add_trace(go.Bar(x=sub["ym"], y=sub["count_share_pct"],
+                                name=lbl, marker_color=color, showlegend=False))
+
+    fig_v.update_layout(barmode="stack", legend=dict(orientation="h", y=-0.25),
+                        yaxis_title="% volume",
+                        **_fig_layout(f"{asset} — Part de volume par bucket ({exchange})", 380))
+    fig_c.update_layout(barmode="stack", yaxis_title="% nombre de trades",
+                        **_fig_layout(f"{asset} — Part du nombre de trades ({exchange})", 300))
+
+    return html.Div([stats, dcc.Graph(figure=fig_v), dcc.Graph(figure=fig_c)])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Callback : CryptoStability — graphiques
+# Données : CryptoStability
 # ══════════════════════════════════════════════════════════════════════════════
 
 @app.callback(
@@ -288,84 +461,115 @@ def update_stability(asset):
     try:
         from pipelines.crypto_stability import load_stability
         result = load_stability()
-        factor = result["factor"]
-        shock  = result["shock"]
-        fi_ff  = result["fi_ff"]
-    except Exception as e:
-        return html.Div(
-            f"Erreur chargement CryptoStability : {e}",
-            style={"color": C["red"], "padding": "20px"}
+    except ModuleNotFoundError as e:
+        return _error(
+            f"Package manquant : {e}",
+            "conda install scikit-learn statsmodels -c conda-forge -y   puis   pip install arch"
         )
+    except Exception as e:
+        return _error(f"Erreur CryptoStability : {e}",
+                      "Lance d'abord : python -m pipelines.crypto_stability")
 
-    # Couleur de classification pour l'asset sélectionné
-    latest = fi_ff[fi_ff["asset"] == asset].sort_values("date").tail(1)
-    classif = latest["classification"].values[0] if len(latest) else "NC"
+    factor = result["factor"]
+    shock  = result["shock"]
+    fi_ff  = result["fi_ff"]
+
+    asset_fi = fi_ff[fi_ff["asset"] == asset].sort_values("date")
+    latest   = asset_fi.tail(1)
+    classif  = latest["classification"].values[0] if len(latest) else "NC"
     classif_color = {"FI": C["green"], "FF": C["red"], "NC": C["muted"]}.get(classif, C["muted"])
 
-    # Badge classification actuelle
-    badge = html.Div(style={"display": "flex", "gap": "16px", "marginBottom": "16px"}, children=[
-        html.Div(style={**CARD, "textAlign": "center", "minWidth": "140px"}, children=[
-            html.P("Classification actuelle", style={"margin": 0, "fontSize": "12px", "color": C["muted"]}),
-            html.H2(classif, style={"margin": "4px 0 0 0", "color": classif_color, "fontSize": "32px"}),
-            html.P({"FI": "Flight-to-safety Indicator",
-                    "FF": "Flight-from-safety",
-                    "NC": "Non classifié"}.get(classif, ""),
-                   style={"margin": 0, "fontSize": "11px", "color": C["muted"]}),
-        ]),
+    # Compter les FI/FF par date (vue marché global)
+    counts = fi_ff.groupby(["date", "classification"]).size().unstack(fill_value=0).reset_index()
+
+    stats = html.Div(style={"display": "flex", "gap": "12px",
+                             "marginBottom": "20px", "flexWrap": "wrap"}, children=[
+        card_stat(f"{asset} — Classification", classif, classif_color),
+        card_stat("Dernière fenêtre",
+                  str(asset_fi["date"].max().date()) if len(asset_fi) else "—"),
     ])
 
-    # Graphique facteur + choc
+    # Facteur + choc
     fig_ts = go.Figure()
-    fig_ts.add_trace(go.Scatter(
-        x=factor.index, y=factor.values,
-        name="Facteur latent (PCA)", line={"color": C["accent"], "width": 1.5}
-    ))
-    fig_ts.add_trace(go.Scatter(
-        x=shock.index, y=shock.values,
-        name="Choc eGARCH", line={"color": C["yellow"], "width": 1}, opacity=0.7,
-        yaxis="y2"
-    ))
+    fig_ts.add_trace(go.Scatter(x=factor.index, y=factor.values,
+                                 name="Facteur latent",
+                                 line={"color": C["accent"], "width": 1.5}))
+    fig_ts.add_trace(go.Scatter(x=shock.index, y=shock.values,
+                                 name="Choc eGARCH", yaxis="y2",
+                                 line={"color": C["yellow"], "width": 1}, opacity=0.6))
     fig_ts.update_layout(
-        title="Facteur latent du marché crypto + choc eGARCH(1,1)",
-        template="plotly_dark",
-        paper_bgcolor=C["surface"],
-        plot_bgcolor=C["surface"],
-        height=350,
-        yaxis=dict(title="Facteur", side="left"),
-        yaxis2=dict(title="Choc", overlaying="y", side="right"),
+        yaxis2=dict(overlaying="y", side="right", title="Choc"),
         legend=dict(orientation="h", y=-0.2),
+        **_fig_layout("Facteur latent + choc eGARCH(1,1)", 340),
     )
 
-    # Graphique beta QR rolling pour l'asset sélectionné
-    asset_qr = fi_ff[fi_ff["asset"] == asset].sort_values("date")
+    # Beta QR rolling
     fig_qr = go.Figure()
-    for col, tau_label, color in [
+    for col, label, color in [
         ("beta_05", "β(τ=0.05)", C["red"]),
-        ("beta_50", "β(τ=0.50)", C["text"]),
+        ("beta_50", "β(τ=0.50)", C["muted2"]),
         ("beta_95", "β(τ=0.95)", C["green"]),
     ]:
-        if col in asset_qr.columns:
-            fig_qr.add_trace(go.Scatter(
-                x=asset_qr["date"], y=asset_qr[col],
-                name=tau_label, line={"color": color, "width": 1.5}
-            ))
-    fig_qr.add_hline(y=0, line_dash="dash", line_color=C["muted"], opacity=0.5)
+        if col in asset_fi.columns:
+            fig_qr.add_trace(go.Scatter(x=asset_fi["date"], y=asset_fi[col],
+                                         name=label, line={"color": color, "width": 1.5}))
+    fig_qr.add_hline(y=0, line_dash="dash", line_color=C["border"])
     fig_qr.update_layout(
-        title=f"{asset} — Coefficients β rolling (fenêtre 18 mois)",
-        template="plotly_dark",
-        paper_bgcolor=C["surface"],
-        plot_bgcolor=C["surface"],
-        height=350,
-        yaxis_title="β",
         legend=dict(orientation="h", y=-0.2),
+        yaxis_title="β",
+        **_fig_layout(f"{asset} — Coefficients QR rolling (fenêtre 18 mois)", 320),
     )
 
-    return html.Div([badge, dcc.Graph(figure=fig_ts), dcc.Graph(figure=fig_qr)])
+    # Nb actifs FI/FF par date
+    fig_ff = go.Figure()
+    for col, color, label in [("FI", C["green"], "FI"), ("FF", C["red"], "FF")]:
+        if col in counts.columns:
+            fig_ff.add_trace(go.Bar(x=counts["date"], y=counts[col],
+                                    name=label, marker_color=color))
+    fig_ff.update_layout(barmode="stack", yaxis_title="Nombre d'actifs",
+                          **_fig_layout("Nombre d'actifs FI / FF par fenêtre", 260))
+
+    return html.Div([stats, dcc.Graph(figure=fig_ts),
+                     dcc.Graph(figure=fig_qr), dcc.Graph(figure=fig_ff)])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Lancement
+# Helpers graphiques
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _fig_layout(title, height):
+    return dict(
+        title=dict(text=title, font=dict(size=14, color=C["text"])),
+        template="plotly_dark",
+        paper_bgcolor=C["card"],
+        plot_bgcolor=C["card"],
+        margin=dict(l=48, r=24, t=44, b=40),
+        height=height,
+        font=dict(family=FONT, color=C["muted2"]),
+        xaxis=dict(gridcolor=C["border"], linecolor=C["border"]),
+        yaxis=dict(gridcolor=C["border"], linecolor=C["border"]),
+    )
+
+def _error(msg, hint=None):
+    return html.Div(style={
+        "backgroundColor": "#1f0f0f", "border": f"1px solid {C['red']}",
+        "borderRadius": "8px", "padding": "20px",
+    }, children=[
+        html.P(msg, style={"color": C["red"], "margin": 0, "fontWeight": "500"}),
+        html.Code(hint, style={"color": C["muted2"], "fontSize": "12px",
+                                "display": "block", "marginTop": "8px"}) if hint else None,
+    ])
+
+def _info(msg, sub=None):
+    return html.Div(style={
+        "backgroundColor": C["card"], "border": f"1px solid {C['border']}",
+        "borderRadius": "8px", "padding": "32px", "textAlign": "center",
+    }, children=[
+        html.P(msg, style={"color": C["muted2"], "margin": 0}),
+        html.P(sub, style={"color": C["muted"], "fontSize": "12px",
+                            "marginTop": "6px"}) if sub else None,
+    ])
+
 
 if __name__ == "__main__":
     app.run(debug=False, port=8050)
