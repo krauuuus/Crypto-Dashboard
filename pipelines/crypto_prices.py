@@ -142,7 +142,18 @@ def load_prices(force_refresh: bool = False) -> pd.DataFrame:
     result.to_parquet(CACHE_FILE, index=False, compression="snappy")
     _save_meta()
 
-    log.info(f"crypto_prices : {len(result)} lignes sauvegardées → {CACHE_FILE}")
+    # Export vers le data repo
+    try:
+        from .data_repo import export as repo_export
+        import datetime
+        repo_export(
+            result, "crypto_prices", "crypto_prices.parquet",
+            commit_msg=f"data: update crypto_prices ({datetime.date.today()})",
+        )
+    except Exception as e:
+        log.warning(f"data_repo export skipped: {e}")
+
+    log.info(f"crypto_prices : {len(result)} lignes -> {CACHE_FILE}")
     return result
 
 

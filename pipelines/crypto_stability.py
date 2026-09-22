@@ -248,7 +248,21 @@ def load_stability(force_refresh: bool = False) -> dict:
     fi_ff.to_parquet(str(CACHE_FILE).replace(".parquet", "_fifff.parquet"), index=False)
     _save_meta()
 
-    log.info("crypto_stability : cache sauvegardé")
+    # Export vers le data repo
+    try:
+        from .data_repo import export as repo_export
+        import datetime
+        today = datetime.date.today()
+        repo_export(ts,    "crypto_stability", "factor_shock.parquet",
+                    commit_msg=f"data: update crypto_stability ({today})", push=False)
+        repo_export(qr,    "crypto_stability", "qr_rolling.parquet",
+                    commit_msg="", push=False)
+        repo_export(fi_ff, "crypto_stability", "fi_ff.parquet",
+                    commit_msg=f"data: update crypto_stability ({today})", push=True)
+    except Exception as e:
+        log.warning(f"data_repo export skipped: {e}")
+
+    log.info("crypto_stability : cache sauvegarde")
     return {"factor": factor, "shock": shock, "qr": qr, "fi_ff": fi_ff}
 
 

@@ -10,8 +10,16 @@ from dash import Dash, html, dcc, Input, Output, State, ctx
 import plotly.graph_objects as go
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger(__name__)
 
 app = Dash(__name__, suppress_callback_exceptions=True, title="Crypto Research")
+
+# Pull du data repo au demarrage (une seule fois, lecture disque ensuite)
+try:
+    from pipelines.data_repo import pull as _data_pull
+    _data_pull()
+except Exception as _e:
+    log.warning(f"data_repo pull skipped au demarrage : {_e}")
 
 # ── Design tokens ─────────────────────────────────────────────────────────────
 C = {
