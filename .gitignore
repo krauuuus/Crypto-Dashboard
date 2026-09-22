@@ -1,0 +1,23 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Données (trop lourdes, régénérées par les pipelines)
+data/raw/
+data/cache/
+*.parquet
+*.csv
+*.xlsx
+
+# Jupyter
+.ipynb_checkpoints/
+notebooks/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
