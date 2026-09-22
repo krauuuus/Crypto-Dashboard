@@ -58,15 +58,8 @@ SECTIONS = [
         "color": C["yellow"],
         "status": "disponible",
     },
-    {
-        "id":    "cbdc",
-        "icon":  "",
-        "title": "Banques centrales",
-        "desc":  "Discours BIS, sentiment CBDC, stance, donnees Artemis",
-        "color": C["green"],
-        "status": "bientot",
-    },
 ]
+# CBDC section ajoutee quand la pipeline bis_speeches.py sera prete
 
 STATUS_STYLE = {
     "disponible": {"bg": "#16201a", "color": C["green"],  "label": "Disponible"},
@@ -288,7 +281,6 @@ app.layout = html.Div(
     Input({"type": "nav-card", "section": "prices"},    "n_clicks"),
     Input({"type": "nav-card", "section": "buckets"},   "n_clicks"),
     Input({"type": "nav-card", "section": "stability"}, "n_clicks"),
-    Input({"type": "nav-card", "section": "cbdc"},      "n_clicks"),
     Input("btn-back", "n_clicks"),
     prevent_initial_call=True,
 )
@@ -297,12 +289,7 @@ def navigate(*_):
     if tid == "btn-back":
         return "home"
     if isinstance(tid, dict):
-        section = tid.get("section", "home")
-        # bloquer la navigation sur "bientot"
-        for s in SECTIONS:
-            if s["id"] == section and s["status"] == "bientot":
-                return dash.no_update
-        return section
+        return tid.get("section", "home")
     return "home"
 
 
