@@ -1,14 +1,13 @@
 """
-crypto_stability.py — Pipeline CryptoStability (spec noscale_base)
-Étapes : PCA(r=1) → eGARCH(1,1) → rolling QR (τ=0.05/0.50/0.95) → FI/FF
+crypto_stability.py — Pipeline CryptoStability
+Étapes : PCA(r=1, 7 cryptos) → GARCH(1,1) → rolling QR variance-scaled → FI/FF
 
-Le problème de révision DFM :
-  La PCA sur la matrice de corrélation change quand on ajoute des données,
-  ce qui révise rétrospectivement toutes les estimations passées du choc.
-  Solution : cache avec timestamp 24h — on ré-estime seulement si le cache
-  est plus vieux que CACHE_TTL_H heures, sinon on sert les estimations figées.
-
-Packages requis : scikit-learn, arch, statsmodels, numpy, pandas
+Spec alignée sur le notebook R (Che et al. 2023) :
+  - Facteur : PCA sur log-returns des 7 cryptos de référence (≈ DFM r=1)
+  - Choc    : résidus GARCH scalés par SD rolling 90j (adj_shock90)
+  - QR      : adj_returns90 ~ adj_shock90 (returns scalés par var 90j)
+  - Wald    : bilatéral, p = 2·Φ(-|z|) < 0.10, direction séparée
+  - Couv.   : ≥ 90% d'obs dans chaque fenêtre
 """
 
 import datetime
@@ -27,10 +26,15 @@ CACHE_FILE  = ROOT / "data" / "cache" / "crypto_stability.parquet"
 _CACHE_META = ROOT / "data" / "cache" / "crypto_stability_meta.json"
 CACHE_TTL_H = 24
 
-# Paramètres du modèle (alignés sur paths.yml du papier)
-WINDOW_MONTHS = 18
-TAU_VEC       = [0.05, 0.50, 0.95]
-MIN_COVERAGE  = 0.90   # fraction minimum d'observations dans une fenêtre
+# Paramètres du modèle
+WINDOW_MONTHS  = 18
+TAU_VEC        = [0.05, 0.50, 0.95]
+MIN_COVERAGE   = 0.90
+WALD_ALPHA     = 0.10
+ROLL_VAR_DAYS  = 90    # fenêtre rolling variance (retours) et SD (choc)
+
+# 7 cryptos pour le facteur commun (Che et al. 2023)
+FACTOR_CRYPTOS = ["BTC", "ETH", "XRP", "BNB", "ADA", "TRX", "DOGE"]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -60,28 +64,30 @@ def _save_meta() -> None:
 
 def extract_factor(returns: pd.DataFrame) -> pd.Series:
     """
-    Extrait le premier facteur commun via PCA numpy (SVD sur matrice de corrélation).
-    Panel équilibré : cryptos avec ≥ 80% de couverture, dates d'intersection complètes.
+    PC1 via power iteration sur les 7 cryptos de référence (≈ DFM r=1).
+    Input  : log-returns daily wide (toutes cryptos).
+    Output : série du facteur commun (log-returns du facteur, même échelle).
     """
-    # Panel équilibré
-    clean = returns.replace([np.inf, -np.inf], np.nan)
-    coverage = clean.notna().mean()
-    clean = clean.loc[:, coverage >= 0.80].dropna()
-    log.info(f"extract_factor : {clean.shape[1]}/{returns.shape[1]} colonnes (couv.≥80%), {clean.shape[0]} obs")
+    # Restreindre aux 7 cryptos de référence disponibles
+    available = [c for c in FACTOR_CRYPTOS if c in returns.columns]
+    if len(available) < 3:
+        log.warning(f"extract_factor : seulement {len(available)} cryptos de référence dispo, fallback sur tout le panel")
+        available = list(returns.columns)
 
-    # Standardisation — opérations element-wise uniquement (évite BLAS)
+    clean = returns[available].replace([np.inf, -np.inf], np.nan).dropna()
+    log.info(f"extract_factor : {len(available)} cryptos de référence, {clean.shape[0]} obs")
+
     X = clean.values.astype(np.float64)
     mu  = np.mean(X, axis=0)
     sig = np.std(X, axis=0)
     sig[sig < 1e-12] = 1.0
     X = (X - mu) / sig
 
-    # PCA PC1 via power iteration sans BLAS (np.linalg.svd/eigh crashent sur cet env)
     n, p = X.shape
     v = np.ones(p) / np.sqrt(float(p))
     for _ in range(200):
-        Xv   = np.sum(X * v,        axis=1)   # X @ v   (element-wise)
-        XtXv = np.sum(X * Xv[:, None], axis=0)  # X.T @ Xv
+        Xv   = np.sum(X * v,           axis=1)
+        XtXv = np.sum(X * Xv[:, None], axis=0)
         norm = np.sqrt(np.sum(XtXv ** 2))
         if norm < 1e-14:
             break
@@ -92,11 +98,10 @@ def extract_factor(returns: pd.DataFrame) -> pd.Series:
         v = v_new
 
     factor_raw = np.sum(X * v, axis=1)
-
     factor = pd.Series(factor_raw, index=clean.index, name="factor")
 
-    # Convention de signe : corrélation positive avec BTC (si présent)
-    btc_col = "BTC" if "BTC" in clean.columns else clean.columns[0]
+    # Convention de signe : corrélation positive avec BTC
+    btc_col  = "BTC" if "BTC" in clean.columns else clean.columns[0]
     btc_vals = clean[btc_col].values - np.mean(clean[btc_col].values)
     fac_vals = factor_raw - np.mean(factor_raw)
     if np.sum(fac_vals * btc_vals) < 0:
@@ -152,15 +157,18 @@ def fit_egarch(factor: pd.Series) -> pd.Series:
             sigma2[t] = omega + alpha * eps[t - 1] ** 2 + beta * sigma2[t - 1]
         sigma2     = np.maximum(sigma2, 1e-12)
         std_resid  = eps / np.sqrt(sigma2)
-        shock = pd.Series(std_resid, index=series.index, name="shock")
+        shock_raw = pd.Series(std_resid, index=series.index, name="shock")
         log.info(f"GARCH(1,1) ajusté — ω={omega:.5f}, α={alpha:.4f}, β={beta:.4f}")
-        return shock
     except Exception as e:
-        log.warning(f"GARCH(1,1) manuel échec : {e}")
+        log.warning(f"GARCH(1,1) manuel échec : {e} — fallback z-score")
+        shock_raw = ((series - float(np.mean(series.values)))
+                     / float(np.std(series.values))).rename("shock")
 
-    log.warning("Fallback z-score (aucun modèle GARCH n'a convergé)")
-    z = (series - float(np.mean(series.values))) / float(np.std(series.values))
-    return z.rename("shock")
+    # Scalage du choc par écart-type rolling 90 jours (adj_shock90)
+    sd90 = shock_raw.rolling(ROLL_VAR_DAYS, min_periods=30).std()
+    adj_shock = (shock_raw / sd90).rename("adj_shock90")
+    log.info(f"adj_shock90 : {adj_shock.notna().sum()} obs valides")
+    return shock_raw, adj_shock
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -260,87 +268,75 @@ def _qr_noblas(X: np.ndarray, y: np.ndarray, tau: float,
 # ══════════════════════════════════════════════════════════════════════════════
 
 def rolling_quantile_regression(
-    returns: pd.DataFrame,
-    shock:   pd.Series,
+    returns:    pd.DataFrame,
+    adj_shock:  pd.Series,
 ) -> pd.DataFrame:
     """
-    Modèle (éq. 1 du papier) :
-        Q_τ(r_it | f*_t) = α_i(τ) + β_i(τ)·f*_t + γ_i(τ)·f*_t·D_lower + φ_i(τ)·f*_t·D_upper
+    Modèle aligné sur le notebook R :
+        Q_τ(adj_ret_it) = α_i(τ) + β_i(τ) · adj_shock_t
 
-    D_lower = 1 si f*_t ≤ 5e pctile in-window ; D_upper = 1 si f*_t ≥ 95e pctile.
+    adj_ret_it  = r_it / var_90j(r_it)   — scalage par variance rolling 90j
+    adj_shock_t = shock_t / sd_90j       — choc scalé (passé en entrée)
 
-    Pas de la fenêtre : mensuel (une estimation par fin de mois).
-    Données dans chaque fenêtre : returns journaliers sur les 18 mois glissants.
-    Retourne une ligne par (fin_de_mois × asset × tau).
+    Fenêtre 18 mois glissants, pas mensuel, couverture ≥ 90%.
     """
-    common = returns.index.intersection(shock.index)
+    common = returns.index.intersection(adj_shock.index)
     ret    = returns.loc[common]
-    shk    = shock.loc[common]
+    shk    = adj_shock.loc[common].rename("adj_shock")
 
     ret.index = pd.to_datetime(ret.index)
     shk.index = pd.to_datetime(shk.index)
 
-    # Dates de fin de mois présentes dans l'échantillon
-    month_ends = ret.resample("ME").last().index
+    # Pré-calcul des retours scalés (var rolling 90j) pour chaque asset
+    var90 = ret.rolling(ROLL_VAR_DAYS, min_periods=30).var()
+    adj_ret = ret.div(var90).replace([np.inf, -np.inf], np.nan)
 
-    # Nombre minimum d'observations daily pour une fenêtre de WINDOW_MONTHS mois
-    min_obs = int(WINDOW_MONTHS * 21 * MIN_COVERAGE)
-
-    records = []
-    n_windows_total = len(month_ends)
+    month_ends  = ret.resample("ME").last().index
+    min_obs     = int(WINDOW_MONTHS * 21 * MIN_COVERAGE)
+    n_total     = len(month_ends)
+    records     = []
 
     for i, end_date in enumerate(month_ends):
-        start_date = end_date - pd.DateOffset(months=WINDOW_MONTHS)
-        window_ret = ret.loc[start_date:end_date]
-        window_shk = shk.loc[start_date:end_date]
+        start_date  = end_date - pd.DateOffset(months=WINDOW_MONTHS)
+        w_adj_ret   = adj_ret.loc[start_date:end_date]
+        w_shk       = shk.loc[start_date:end_date]
 
-        n_obs = len(window_ret)
+        n_obs = len(w_adj_ret)
         if n_obs < min_obs:
             continue
 
         if i % 10 == 0:
-            log.info(f"QR rolling : fenêtre {i+1}/{n_windows_total} ({end_date.date()})")
+            log.info(f"QR rolling : fenêtre {i+1}/{n_total} ({end_date.date()})")
 
-        shk_vals = window_shk.values
-
-        lo_cut = np.percentile(shk_vals, 5)
-        hi_cut = np.percentile(shk_vals, 95)
-        D_lo = (shk_vals <= lo_cut).astype(float)
-        D_hi = (shk_vals >= hi_cut).astype(float)
-
-        X = np.column_stack([
-            np.ones(n_obs),
-            shk_vals,
-            shk_vals * D_lo,
-            shk_vals * D_hi,
-        ])
+        shk_vals = w_shk.values
+        X = np.column_stack([np.ones(n_obs), shk_vals])   # p=2
 
         for asset in returns.columns:
-            y = window_ret[asset].values
-            if np.any(np.isnan(y)):
+            y = w_adj_ret[asset].values
+            valid = ~np.isnan(y) & ~np.isnan(shk_vals)
+            if valid.sum() < int(min_obs * 0.5):
                 continue
+            y_v   = y[valid]
+            X_v   = X[valid]
 
             for tau in TAU_VEC:
                 try:
-                    params, se = _qr_noblas(X, y, tau)
+                    params, se = _qr_noblas(X_v, y_v, tau)
                     records.append({
                         "date":    end_date.to_period("M").to_timestamp(),
                         "asset":   asset,
                         "tau":     tau,
-                        "alpha":   params[0],
                         "beta":    params[1],
-                        "gamma":   params[2],
-                        "phi":     params[3],
                         "beta_se": se[1],
-                        "n_obs":   n_obs,
+                        "n_obs":   int(valid.sum()),
                     })
                 except Exception:
                     pass
 
     df = pd.DataFrame(records)
-    n_assets = returns.columns.nunique() if hasattr(returns.columns, "nunique") else len(returns.columns)
+    n_assets  = len(returns.columns)
     n_windows = len(df) // max(n_assets * len(TAU_VEC), 1)
-    log.info(f"QR rolling : {len(df)} estimations ({n_windows} fenêtres mensuelles × {n_assets} assets)")
+    log.info(f"QR rolling : {len(df)} estimations ({n_windows} fenêtres × {n_assets} assets)")
     return df
 
 
@@ -353,15 +349,14 @@ def rolling_quantile_regression(
 #   NC : ni l'un ni l'autre
 # ══════════════════════════════════════════════════════════════════════════════
 
-_WALD_CRIT = 1.282   # z unilatéral α = 0.10
-
 def classify_fi_ff(qr_results: pd.DataFrame) -> pd.DataFrame:
     """
-    Classification via test de Wald pairwise (KoenkerMachado1999) à 10%.
-    FI : β(0.05) > β(0.50) significativement  — amplification gauche (crise)
-    FF : β(0.95) > β(0.50) significativement  — amplification droite (Minsky)
-    Colonnes : date, asset, beta_05, beta_50, beta_95, z_lower, z_upper, classification.
+    Test de Wald bilatéral (Koenker & Machado 1999), α = 10%.
+    FI : β(0.05) ≠ β(0.50) significativement ET β(0.05) > β(0.50)  — contagion
+    FF : β(0.95) ≠ β(0.50) significativement ET β(0.95) > β(0.50)  — ripple/spéculation
     """
+    from scipy.stats import norm as _norm
+
     beta_piv = qr_results.pivot_table(
         index=["date", "asset"], columns="tau", values="beta"
     ).reset_index()
@@ -376,27 +371,31 @@ def classify_fi_ff(qr_results: pd.DataFrame) -> pd.DataFrame:
 
     pivot = beta_piv.merge(se_piv, on=["date", "asset"])
 
-    def _z(diff, se_a, se_b):
-        denom = np.sqrt(se_a**2 + se_b**2)
-        return float(diff / denom) if denom > 0 else 0.0
-
-    pivot["z_lower"] = pivot.apply(
-        lambda r: _z(r["beta_05"] - r["beta_50"], r["se_05"], r["se_50"]), axis=1)
-    pivot["z_upper"] = pivot.apply(
-        lambda r: _z(r["beta_95"] - r["beta_50"], r["se_95"], r["se_50"]), axis=1)
+    def _wald(b1, s1, b2, s2):
+        denom = np.sqrt(s1**2 + s2**2)
+        if denom < 1e-14:
+            return 0.0, 1.0
+        z = (b1 - b2) / denom
+        p = 2.0 * float(_norm.sf(abs(z)))   # bilatéral
+        return float(z), p
 
     def classify(row):
-        fi = row["z_lower"] > _WALD_CRIT
-        ff = row["z_upper"] > _WALD_CRIT
+        z_lo, p_lo = _wald(row["beta_05"], row["se_05"], row["beta_50"], row["se_50"])
+        z_hi, p_hi = _wald(row["beta_95"], row["se_95"], row["beta_50"], row["se_50"])
+        # FI : rejet ET direction croissante (β_05 > β_50)
+        fi = (p_lo < WALD_ALPHA) and (row["beta_05"] > row["beta_50"])
+        ff = (p_hi < WALD_ALPHA) and (row["beta_95"] > row["beta_50"])
         if fi and ff:
-            return "FI+FF"
+            return pd.Series([z_lo, p_lo, z_hi, p_hi, "FI+FF"])
         if fi:
-            return "FI"
+            return pd.Series([z_lo, p_lo, z_hi, p_hi, "FI"])
         if ff:
-            return "FF"
-        return "NC"
+            return pd.Series([z_lo, p_lo, z_hi, p_hi, "FF"])
+        return pd.Series([z_lo, p_lo, z_hi, p_hi, "NC"])
 
-    pivot["classification"] = pivot.apply(classify, axis=1)
+    pivot[["z_lower", "p_lower", "z_upper", "p_upper", "classification"]] = \
+        pivot.apply(classify, axis=1)
+
     return pivot
 
 
@@ -474,18 +473,20 @@ def load_stability(force_refresh: bool = False) -> dict:
 
     from .crypto_prices import get_stability_symbols, load_returns_broad
     symbols = get_stability_symbols(n=100)
-    returns = load_returns_broad(symbols, min_coverage=0.5)  # prix : TTL propre (24h)
+    returns = load_returns_broad(symbols, min_coverage=0.5)
 
-    factor = extract_factor(returns)
-    shock  = fit_egarch(factor)
-    qr     = rolling_quantile_regression(returns, shock)
-    fi_ff  = classify_fi_ff(qr)
-    share  = agg_fi_ff_share(fi_ff)
+    factor              = extract_factor(returns)
+    shock_raw, adj_shock = fit_egarch(factor)
+    qr                  = rolling_quantile_regression(returns, adj_shock)
+    fi_ff               = classify_fi_ff(qr)
+    share               = agg_fi_ff_share(fi_ff)
 
     # Sauvegarde cache
     CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    ts = pd.DataFrame({"date": factor.index, "factor": factor.values,
-                       "shock": shock.reindex(factor.index).values})
+    ts = pd.DataFrame({"date":      factor.index,
+                       "factor":    factor.values,
+                       "shock":     shock_raw.reindex(factor.index).values,
+                       "adj_shock": adj_shock.reindex(factor.index).values})
     ts.to_parquet(CACHE_FILE, index=False, compression="snappy")
     qr.to_parquet(str(CACHE_FILE).replace(".parquet", "_qr.parquet"), index=False)
     fi_ff.to_parquet(str(CACHE_FILE).replace(".parquet", "_fifff.parquet"), index=False)
