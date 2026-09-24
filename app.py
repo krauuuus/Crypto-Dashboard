@@ -939,5 +939,7 @@ def _info(msg, sub=None):
     ])
 
 
+server = app.server  # for gunicorn: gunicorn app:server
+
 if __name__ == "__main__":
     app.run(debug=False, port=8050)
