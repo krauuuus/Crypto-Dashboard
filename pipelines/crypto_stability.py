@@ -509,7 +509,7 @@ def load_stability(force_refresh: bool = False) -> dict:
         log.warning(f"data_repo export skipped: {e}")
 
     log.info("crypto_stability : cache sauvegardé")
-    return {"factor": factor, "shock": shock, "qr": qr,
+    return {"factor": factor, "shock": shock_raw, "qr": qr,
             "fi_ff": fi_ff, "fi_ff_share": share}
 
 
