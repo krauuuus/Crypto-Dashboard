@@ -16,13 +16,31 @@ from pathlib import Path
 
 import pandas as pd
 
-from .config import ROOT, CRYPTOCOMPARE_API_KEY, CRYPTO_BASKET, START_DATE
+from .config import ROOT, CRYPTOCOMPARE_API_KEY, COINMARKETCAP_API_KEY, CRYPTO_BASKET, START_DATE
+
+# Mapping symbole → ticker Yahoo Finance (fallback si CryptoCompare rate limit)
+_YF_TICKERS = {
+    "BTC": "BTC-USD", "ETH": "ETH-USD", "XRP": "XRP-USD",
+    "BNB": "BNB-USD", "ADA": "ADA-USD", "TRX": "TRX-USD", "DOGE": "DOGE-USD",
+}
 
 log = logging.getLogger(__name__)
 
 CACHE_FILE  = ROOT / "data" / "cache" / "crypto_prices.parquet"
 _CACHE_META = ROOT / "data" / "cache" / "crypto_prices_meta.json"
-CACHE_TTL_H = 24   # heures avant de rafraîchir
+CACHE_TTL_H = 24
+
+# Cache broad (top-N stability)
+_BROAD_FILE       = ROOT / "data" / "cache" / "crypto_prices_broad.parquet"
+_BROAD_META       = ROOT / "data" / "cache" / "crypto_prices_broad_meta.json"
+_SYMBOLS_CACHE    = ROOT / "data" / "cache" / "stability_symbols.json"
+_SYMBOLS_TTL_H    = 7 * 24   # liste stable → refresh hebdo
+
+_STABLECOIN_TAGS  = {"stablecoin"}
+_STABLECOIN_SYMS  = {
+    "USDT","USDC","BUSD","DAI","TUSD","USDP","GUSD","FRAX","LUSD",
+    "UST","USDN","FDUSD","PYUSD","CRVUSD","USDE","SUSD","USDJ","HUSD",
+}
 
 _CC_BASE = "https://min-api.cryptocompare.com/data/v2/histoday"
 _MAX_LIMIT = 2000  # max par appel CryptoCompare
@@ -105,6 +123,36 @@ def _fetch_symbol(symbol: str, start: datetime.date, end: datetime.date) -> pd.D
     return df
 
 
+def _fetch_symbol_yf(symbol: str, start: datetime.date, end: datetime.date) -> pd.DataFrame:
+    """Fallback yfinance quand CryptoCompare est rate-limité."""
+    try:
+        import yfinance as yf
+    except ImportError:
+        log.warning("yfinance non installé (pip install yfinance)")
+        return pd.DataFrame()
+    try:
+        ticker = _YF_TICKERS.get(symbol, f"{symbol}-USD")
+        raw = yf.download(ticker, start=str(start), end=str(end + datetime.timedelta(days=1)),
+                          auto_adjust=True, progress=False)
+        if raw.empty:
+            return pd.DataFrame()
+        raw = raw.reset_index()
+        # yfinance renvoie des colonnes MultiIndex si un seul ticker — on aplatit
+        if isinstance(raw.columns, pd.MultiIndex):
+            raw.columns = [c[0].lower() if c[1] == "" else c[0].lower() for c in raw.columns]
+        else:
+            raw.columns = [c.lower() for c in raw.columns]
+        raw = raw.rename(columns={"date": "date", "volume": "volume_usd"})
+        raw["date"] = pd.to_datetime(raw["date"]).dt.date
+        raw["volume_crypto"] = raw["volume_usd"]  # yfinance = volume en unités native
+        raw["symbol"] = symbol
+        cols = ["date", "open", "high", "low", "close", "volume_crypto", "volume_usd", "symbol"]
+        return raw[[c for c in cols if c in raw.columns]].sort_values("date").reset_index(drop=True)
+    except Exception as e:
+        log.warning(f"[yfinance] {symbol} erreur: {e}")
+        return pd.DataFrame()
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Point d'entrée public
 # ══════════════════════════════════════════════════════════════════════════════
@@ -130,10 +178,27 @@ def load_prices(force_refresh: bool = False) -> pd.DataFrame:
         if not df.empty:
             frames.append(df)
         else:
-            log.warning(f"  ✗ {symbol} : aucune donnée")
+            log.warning(f"  ✗ {symbol} : CryptoCompare vide, tentative yfinance...")
+            df_yf = _fetch_symbol_yf(symbol, start, end)
+            if not df_yf.empty:
+                frames.append(df_yf)
+                log.info(f"  ✓ {symbol} : yfinance OK ({len(df_yf)} jours)")
+            else:
+                log.warning(f"  ✗ {symbol} : aucune donnée (CC + yfinance)")
+
+    # Complète les symboles manquants depuis yfinance
+    fetched = {df["symbol"].iloc[0] for df in frames} if frames else set()
+    missing = [s for s in CRYPTO_BASKET if s not in fetched]
+    if missing:
+        log.info(f"  yfinance fallback pour : {missing}")
+        for symbol in missing:
+            df_yf = _fetch_symbol_yf(symbol, start, end)
+            if not df_yf.empty:
+                frames.append(df_yf)
+                log.info(f"  ✓ {symbol} : yfinance OK ({len(df_yf)} jours)")
 
     if not frames:
-        raise RuntimeError("CryptoCompare : aucune donnée récupérée — vérifier la clé API")
+        raise RuntimeError("Aucune donnée récupérée — vérifier les clés API")
 
     result = pd.concat(frames, ignore_index=True)
     result = result.sort_values(["symbol", "date"]).reset_index(drop=True)
@@ -145,7 +210,6 @@ def load_prices(force_refresh: bool = False) -> pd.DataFrame:
     # Export vers le data repo
     try:
         from .data_repo import export as repo_export
-        import datetime
         repo_export(
             result, "crypto_prices", "crypto_prices.parquet",
             commit_msg=f"data: update crypto_prices ({datetime.date.today()})",
@@ -169,6 +233,171 @@ def load_returns(force_refresh: bool = False) -> pd.DataFrame:
     returns = np.log(wide / wide.shift(1)).dropna()
     returns.columns.name = None
     return returns
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Top-N symboles pour la stability (hors stablecoins)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def get_stability_symbols(n: int = 100) -> list[str]:
+    """
+    Retourne les n plus grosses cryptos hors stablecoins d'après CoinMarketCap.
+    Cache JSON hebdomadaire (la liste évolue lentement).
+    Fallback : CRYPTO_BASKET si pas de clé CMC.
+    """
+    if _SYMBOLS_CACHE.exists():
+        meta = json.loads(_SYMBOLS_CACHE.read_text())
+        age_h = (datetime.datetime.now() -
+                 datetime.datetime.fromisoformat(meta["fetched_at"])
+                 ).total_seconds() / 3600
+        if age_h < _SYMBOLS_TTL_H and len(meta.get("symbols", [])) >= n:
+            return meta["symbols"][:n]
+
+    if not COINMARKETCAP_API_KEY:
+        log.warning("get_stability_symbols : COINMARKETCAP_API_KEY manquante, fallback CRYPTO_BASKET")
+        return list(CRYPTO_BASKET)
+
+    url = ("https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
+           "?limit=250&convert=USD")
+    try:
+        req = urllib.request.Request(url, headers={"X-CMC_PRO_API_KEY": COINMARKETCAP_API_KEY})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read())
+    except Exception as e:
+        log.warning(f"get_stability_symbols : erreur CMC ({e})")
+        return list(CRYPTO_BASKET)
+
+    symbols = []
+    for item in data.get("data", []):
+        sym  = item.get("symbol", "")
+        tags = set(item.get("tags", []))
+        if _STABLECOIN_TAGS & tags or sym in _STABLECOIN_SYMS:
+            continue
+        # Ignorer les symboles non-ASCII (junk tokens)
+        if not sym.isascii():
+            continue
+        symbols.append(sym)
+        if len(symbols) >= n:
+            break
+
+    if not symbols:
+        return list(CRYPTO_BASKET)
+
+    _SYMBOLS_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    _SYMBOLS_CACHE.write_text(json.dumps({
+        "fetched_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        "symbols": symbols,
+    }))
+    log.info(f"get_stability_symbols : {len(symbols)} symboles (ex: {symbols[:5]})")
+    return symbols
+
+
+def _broad_cache_covers(symbols: list[str]) -> bool:
+    """Vérifie que le cache broad est frais ET contient tous les symboles demandés."""
+    if not _BROAD_FILE.exists() or not _BROAD_META.exists():
+        return False
+    meta = json.loads(_BROAD_META.read_text())
+    age_h = (datetime.datetime.now() -
+             datetime.datetime.fromisoformat(meta["fetched_at"])
+             ).total_seconds() / 3600
+    if age_h >= CACHE_TTL_H:
+        return False
+    cached_syms = set(meta.get("symbols", []))
+    return set(symbols).issubset(cached_syms)
+
+
+def load_prices_broad(symbols: list[str], force_refresh: bool = False) -> pd.DataFrame:
+    """
+    OHLCV daily pour une liste arbitraire de symboles.
+    Cache séparé (crypto_prices_broad.parquet).
+    Fetch incrémental : nouveaux symboles depuis START_DATE,
+    symboles existants depuis leur dernière date en cache.
+    """
+    start_full = datetime.date.fromisoformat(START_DATE)
+    end        = datetime.date.today()
+
+    existing = pd.DataFrame()
+    if _BROAD_FILE.exists() and not force_refresh:
+        existing = pd.read_parquet(_BROAD_FILE)
+
+    if not existing.empty:
+        existing["date"] = pd.to_datetime(existing["date"]).dt.date
+
+    existing_syms = set(existing["symbol"].unique()) if not existing.empty else set()
+
+    # Symboles à jour vs à mettre à jour
+    up_to_date = set()
+    if not existing.empty:
+        latest = existing.groupby("symbol")["date"].max()
+        up_to_date = set(latest[latest >= end].index)
+
+    frames = [existing[existing["symbol"].isin(symbols)]] if not existing.empty else []
+
+    for i, symbol in enumerate(symbols):
+        if symbol in up_to_date and not force_refresh:
+            continue  # déjà à jour
+
+        if symbol in existing_syms and not force_refresh:
+            # Incrémental : seulement les données manquantes
+            last = existing[existing["symbol"] == symbol]["date"].max()
+            fetch_start = last + datetime.timedelta(days=1)
+            if fetch_start > end:
+                continue
+            log.info(f"  broad incrémental → {symbol} depuis {fetch_start}")
+        else:
+            fetch_start = start_full
+            log.info(f"  broad → {symbol} ({i+1}/{len(symbols)})")
+
+        df = _fetch_symbol(symbol, fetch_start, end)
+        if not df.empty:
+            frames.append(df)
+        else:
+            df_yf = _fetch_symbol_yf(symbol, fetch_start, end)
+            if not df_yf.empty:
+                frames.append(df_yf)
+                log.info(f"  ✓ {symbol} : yfinance fallback OK")
+            else:
+                log.warning(f"  ✗ {symbol} : aucune donnée (CC + yfinance)")
+        time.sleep(0.15)
+
+    if not frames:
+        return pd.DataFrame()
+
+    result = pd.concat(frames, ignore_index=True)
+    result["date"] = pd.to_datetime(result["date"]).dt.date
+    result = result.drop_duplicates(subset=["symbol", "date"])
+    result = result.sort_values(["symbol", "date"]).reset_index(drop=True)
+
+    _BROAD_FILE.parent.mkdir(parents=True, exist_ok=True)
+    result.to_parquet(_BROAD_FILE, index=False, compression="snappy")
+    _BROAD_META.write_text(json.dumps({
+        "fetched_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        "symbols": list(result["symbol"].unique()),
+    }))
+    log.info(f"crypto_prices_broad : {result['symbol'].nunique()} symboles, {len(result)} lignes")
+    return result[result["symbol"].isin(symbols)]
+
+
+def load_returns_broad(symbols: list[str],
+                       min_coverage: float = 0.5,
+                       force_refresh: bool = False) -> pd.DataFrame:
+    """
+    Log-rendements daily (wide) pour les symboles donnés.
+    Filtre : conserve uniquement les symboles avec >= min_coverage de la période totale.
+    """
+    import numpy as np
+    prices = load_prices_broad(symbols, force_refresh)
+    if prices.empty:
+        return pd.DataFrame()
+    wide = prices.pivot(index="date", columns="symbol", values="close")
+    wide.index = pd.to_datetime(wide.index)
+    wide.columns.name = None
+    returns = np.log(wide / wide.shift(1))
+    returns = returns.replace([np.inf, -np.inf], np.nan)
+    coverage = returns.notna().mean()
+    valid = coverage[coverage >= min_coverage].index.tolist()
+    log.info(f"load_returns_broad : {len(valid)}/{len(symbols)} symboles (couverture >= {min_coverage:.0%})")
+    return returns[valid].dropna(how="all")
 
 
 if __name__ == "__main__":

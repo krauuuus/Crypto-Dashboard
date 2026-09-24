@@ -1,0 +1,150 @@
+/*
+ * dark.css — Dash Dropdown dark theme
+ * Covers both legacy React-Select (Select-*) and Emotion-based (css-hash-*)
+ */
+
+/* ── Variables de couleurs ─────────────────────────────────────────────────── */
+:root {
+    --dd-bg:     #161925;
+    --dd-bg2:    #1e2235;
+    --dd-border: #2d3148;
+    --dd-text:   #e2e8f0;
+    --dd-muted:  #64748b;
+    --dd-accent: #6366f1;
+    --dd-chip:   #2d3148;
+}
+
+/* ── Global: force dark body/inputs ───────────────────────────────────────── */
+body { background-color: #07080f !important; }
+
+/* ── Legacy React-Select (Dash < 2.x) ──────────────────────────────────────  */
+.Select-control,
+.dash-dropdown .Select-control {
+    background-color: var(--dd-bg) !important;
+    border: 1px solid var(--dd-border) !important;
+    border-radius: 6px !important;
+    color: var(--dd-text) !important;
+    min-height: 36px !important;
+}
+.Select--multi .Select-value,
+.Select-value-label {
+    color: var(--dd-text) !important;
+}
+.Select--multi .Select-value {
+    background-color: var(--dd-chip) !important;
+    border-color: var(--dd-border) !important;
+    border-radius: 4px !important;
+}
+.Select-value-icon { color: var(--dd-muted) !important; border-right-color: var(--dd-border) !important; }
+.Select-value-icon:hover { color: var(--dd-text) !important; background: var(--dd-bg2) !important; }
+.Select-arrow { border-top-color: var(--dd-muted) !important; }
+.Select.is-open > .Select-control { border-color: var(--dd-accent) !important; }
+.Select-menu-outer {
+    background-color: var(--dd-bg) !important;
+    border: 1px solid var(--dd-border) !important;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.7) !important;
+    border-radius: 6px !important;
+    z-index: 9999 !important;
+}
+.Select-option, .VirtualizedSelectOption {
+    background-color: var(--dd-bg) !important;
+    color: var(--dd-muted) !important;
+}
+.Select-option.is-focused, .VirtualizedSelectFocusedOption {
+    background-color: var(--dd-bg2) !important;
+    color: var(--dd-text) !important;
+}
+.Select-option.is-selected {
+    background-color: var(--dd-chip) !important;
+    color: var(--dd-accent) !important;
+}
+.Select-input > input, .Select-input input {
+    color: var(--dd-text) !important;
+    background: transparent !important;
+}
+.Select-placeholder { color: var(--dd-muted) !important; }
+.Select-noresults   { color: var(--dd-muted) !important; background: var(--dd-bg) !important; }
+.Select-multi-value-wrapper { background: transparent !important; }
+
+/* ── Emotion/React-Select v5 (Dash 2+) — attribute selectors ───────────────  */
+
+/* Control box */
+.dash-dropdown [class*="-control"],
+.dash-dropdown [class*="__control"] {
+    background-color: var(--dd-bg) !important;
+    border-color: var(--dd-border) !important;
+    border-radius: 6px !important;
+    box-shadow: none !important;
+    min-height: 36px !important;
+    color: var(--dd-text) !important;
+}
+.dash-dropdown [class*="-control"]:hover,
+.dash-dropdown [class*="__control"]:hover {
+    border-color: var(--dd-accent) !important;
+}
+.dash-dropdown [class*="-control--is-focused"],
+.dash-dropdown [class*="__control--is-focused"] {
+    border-color: var(--dd-accent) !important;
+    box-shadow: 0 0 0 1px var(--dd-accent) !important;
+}
+
+/* Placeholder and single value */
+.dash-dropdown [class*="-placeholder"],
+.dash-dropdown [class*="__placeholder"] { color: var(--dd-muted) !important; }
+.dash-dropdown [class*="-singleValue"],
+.dash-dropdown [class*="__single-value"] { color: var(--dd-text) !important; }
+
+/* Input */
+.dash-dropdown [class*="-Input"] input,
+.dash-dropdown [class*="__input"] input,
+.dash-dropdown input { color: var(--dd-text) !important; }
+
+/* Indicators (arrow, clear) */
+.dash-dropdown [class*="-indicatorContainer"],
+.dash-dropdown [class*="__indicator"] { color: var(--dd-muted) !important; }
+.dash-dropdown [class*="-indicatorSeparator"],
+.dash-dropdown [class*="__indicator-separator"] { background-color: var(--dd-border) !important; }
+
+/* Dropdown menu */
+.dash-dropdown [class*="-menu"],
+.dash-dropdown [class*="__menu"] {
+    background-color: var(--dd-bg) !important;
+    border: 1px solid var(--dd-border) !important;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.7) !important;
+    border-radius: 6px !important;
+    z-index: 9999 !important;
+}
+.dash-dropdown [class*="-MenuList"],
+.dash-dropdown [class*="__menu-list"] { background-color: var(--dd-bg) !important; }
+
+/* Options */
+.dash-dropdown [class*="-option"],
+.dash-dropdown [class*="__option"] {
+    background-color: var(--dd-bg) !important;
+    color: var(--dd-muted) !important;
+}
+.dash-dropdown [class*="-option"]:hover,
+.dash-dropdown [class*="__option--is-focused"] {
+    background-color: var(--dd-bg2) !important;
+    color: var(--dd-text) !important;
+}
+.dash-dropdown [class*="__option--is-selected"] {
+    background-color: var(--dd-chip) !important;
+    color: var(--dd-accent) !important;
+}
+
+/* Multi-select chips */
+.dash-dropdown [class*="-multiValue"],
+.dash-dropdown [class*="__multi-value"] {
+    background-color: var(--dd-chip) !important;
+    border-radius: 4px !important;
+}
+.dash-dropdown [class*="-multiValue__label"],
+.dash-dropdown [class*="__multi-value__label"] { color: var(--dd-text) !important; }
+.dash-dropdown [class*="-multiValue__remove"],
+.dash-dropdown [class*="__multi-value__remove"] { color: var(--dd-muted) !important; }
+.dash-dropdown [class*="-multiValue__remove"]:hover,
+.dash-dropdown [class*="__multi-value__remove"]:hover {
+    background-color: #3d4168 !important;
+    color: #f87171 !important;
+}

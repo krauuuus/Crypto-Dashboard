@@ -13,6 +13,9 @@ data/cache/
 *.csv
 *.xlsx
 
+# Data repo imbriqué (repo git séparé — krauuuus/Crypto-Dashboard-Data)
+crypto-research-data/
+
 # Jupyter
 .ipynb_checkpoints/
 notebooks/

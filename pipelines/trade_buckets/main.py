@@ -30,6 +30,7 @@ from .utils import monthly_result_path, aggregated_result_path, missing_months
 from .bulk_downloader import run_bulk_exchanges
 from .api_fetcher import run_api_exchanges
 from .cftc import build_cftc_series
+from .. import data_repo
 
 logging.basicConfig(
     level=logging.INFO,
@@ -99,10 +100,9 @@ def aggregate_cross_exchange(asset: str, year: int, month: int) -> pd.DataFrame:
         return pd.DataFrame()
 
     df = pd.concat(frames, ignore_index=True)
-    total_cross = df["total_volume_usd"].sum()
-
-    # Ponderer chaque exchange par son poids volumique
-    df["weight"] = df["total_volume_usd"] / total_cross
+    # total_cross = somme des volumes par bucket (les buckets partitionnent le volume)
+    # NE PAS utiliser df["total_volume_usd"].sum() qui répète N fois le total par exchange
+    total_cross = df["volume_usd"].sum()
 
     agg = (
         df.groupby("bucket")
@@ -251,6 +251,18 @@ async def run(args: argparse.Namespace) -> None:
     # ── Export CSV final ──────────────────────────────────────────────────────
     out_dir = export_final_csv(asset)
     log.info(f"Termine. Resultats dans : {out_dir}")
+
+    # ── Export data repo ──────────────────────────────────────────────────────
+    csv_path = OUTPUT_DIR / f"bucket_analysis_{asset}.csv"
+    if csv_path.exists():
+        df_export = pd.read_csv(csv_path)
+        data_repo.export(
+            df_export,
+            subdir="bucket_analysis",
+            filename=f"bucket_analysis_{asset}.parquet",
+            commit_msg=f"bucket_analysis {asset} {end:%Y-%m}",
+        )
+        log.info(f"data_repo : bucket_analysis_{asset}.parquet exporte")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

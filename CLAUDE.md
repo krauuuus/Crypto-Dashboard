@@ -33,9 +33,9 @@ Plus une 4eme source : **IMF WP-CPER** (taux de change paralleles crypto-based).
 | `krauuuus/Crypto-Dashboard` | Code : pipelines + dashboard app |
 | `krauuuus/Crypto-Dashboard-Data` | Donnees : outputs agreges (parquets) |
 
-Clone local des deux repos sur le bureau :
+Clone local des deux repos :
 - `C:\Users\fkraus\Desktop\DASHBOARD CRYPTO\` — code
-- `C:\Users\fkraus\Desktop\crypto-research-data\` — data
+- `C:\Users\fkraus\Desktop\DASHBOARD CRYPTO\crypto-research-data\` — data (repo imbriqué)
 
 **Branches** : `main` = stable et fonctionnel, `dev` = WIP. Ne jamais merger dev → main
 tant qu'une section du dashboard n'est pas entierement validee.
@@ -66,11 +66,13 @@ pip install arch
 
 ## Cles API (.env — JAMAIS committe)
 
-Fichier : `C:\Users\fkraus\Desktop\DASHBOARD CRYPTO\.env`
+Fichier : `.env` a la racine du projet (jamais committe — voir .gitignore).
 
+Variables requises :
 ```
-COINMARKETCAP_API_KEY=91f0f4ff30324242be80d5ab48279def
-CRYPTOCOMPARE_API_KEY=fa3f22a7dee71820b651dd01f16e08046f955778dac240cd006bad2e45a92c46
+COINMARKETCAP_API_KEY=<votre cle>
+CRYPTOCOMPARE_API_KEY=<votre cle>
+JEV_API_KEY=<votre cle>
 ```
 
 Artemis.xyz : pas d'API, donnees Excel statiques uniquement.
@@ -213,7 +215,7 @@ python app.py
 ## Data repo (Crypto-Dashboard-Data)
 
 Les pipelines exportent leurs outputs agreges vers le clone local
-`C:\Users\fkraus\Desktop\crypto-research-data\`, qui pousse automatiquement
+`C:\Users\fkraus\Desktop\DASHBOARD CRYPTO\crypto-research-data\`, qui pousse automatiquement
 vers GitHub (krauuuus/Crypto-Dashboard-Data).
 
 Structure du data repo :
