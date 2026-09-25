@@ -663,12 +663,13 @@ def update_stability(section):
         crix_df   = pd.read_csv(crix_path, sep=";", parse_dates=["date"])
         crix_df   = crix_df.dropna(subset=["price"]).sort_values("date")
         fig_crix  = go.Figure()
+        import numpy as _np
         fig_crix.add_trace(go.Scatter(
-            x=crix_df["date"], y=crix_df["price"].round(1),
+            x=crix_df["date"], y=_np.log(crix_df["price"]).round(4),
             mode="lines", line=dict(color=C["accent2"], width=1.5), showlegend=False,
         ))
         fig_crix.update_layout(
-            yaxis_title="CRIX level",
+            yaxis_title="log(CRIX)",
             annotations=[dict(
                 text="Source: CRIX — Humboldt-Universität zu Berlin (thecrix.de)",
                 xref="paper", yref="paper", x=1, y=-0.12, showarrow=False,
