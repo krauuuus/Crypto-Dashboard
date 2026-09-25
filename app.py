@@ -9,6 +9,7 @@ from pathlib import Path
 import dash
 from dash import Dash, html, dcc, Input, Output, State, ctx, ALL
 import plotly.graph_objects as go
+import pandas as pd
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -567,6 +568,94 @@ def _update_buckets_inner(asset, selected_cuts):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Helper : calcul des portefeuilles FI/FF/Stable/Top-10
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _compute_portfolio(fi_ff_df, broad_df):
+    """
+    Construit 4 portefeuilles mensuels avec lag 1 mois (out-of-sample).
+      FI     : classification == 'FI' exclusivement
+      FF     : classification == 'FF' exclusivement
+      Stable : classification == 'NC'
+      Top-10 : 10 premières cryptos de list.xlsx pour l'année courante
+    Retourne (cum, perf) où :
+      cum  = DataFrame(date, FI, FF, Stable, Top10) — richesse cumulée base 100
+      perf = DataFrame(date, FI, FF, Stable, Top10) — rendements mensuels
+    """
+    import numpy as _np
+    from pathlib import Path as _Path
+
+    # Prix mensuels → retours
+    _b = broad_df.copy()
+    _b["date"] = pd.to_datetime(_b["date"])
+    px = _b.pivot_table(index="date", columns="symbol", values="close").sort_index()
+    monthly_px  = px.resample("ME").last()
+    monthly_ret = monthly_px.pct_change()
+
+    # Classifications mensuelles (date = début de mois dans fi_ff)
+    _f = fi_ff_df.copy()
+    _f["date"] = pd.to_datetime(_f["date"]).dt.to_period("M").dt.to_timestamp()
+    clf_map = {d: g.set_index("asset")["classification"]
+               for d, g in _f.groupby("date")}
+
+    # Top-10 par année depuis list.xlsx
+    list_path = _Path(r"C:\Users\fkraus\Desktop\Recherche\CryptoStability\data\raw\list.xlsx")
+    top10_yr: dict = {}
+    try:
+        df_list = pd.read_excel(list_path, sheet_name="Feuil1", header=0)
+        for col in df_list.columns:
+            if str(col).isdigit():
+                top = [str(s).strip().upper() for s in df_list[col].dropna()
+                       if str(s).strip().replace("-", "").isalpha()][:10]
+                top10_yr[int(str(col))] = top
+    except Exception:
+        pass
+
+    # Boucle mensuelle avec lag 1
+    months = sorted(monthly_ret.index)
+    rows_perf, rows_cum = [], []
+    cum_vals = {p: 100.0 for p in ("FI", "FF", "Stable", "Top10")}
+
+    for i in range(1, len(months)):
+        t      = months[i]
+        t_prev = months[i - 1]
+        t_key  = t_prev.to_period("M").to_timestamp()
+
+        if t_key not in clf_map:
+            avail = [d for d in clf_map if d <= t_key]
+            if not avail:
+                continue
+            t_key = max(avail)
+
+        clf    = clf_map[t_key]
+        rets_t = monthly_ret.loc[t]
+
+        def _ew(assets):
+            valid = [a for a in assets if a in rets_t.index and pd.notna(rets_t[a])]
+            return float(rets_t[valid].mean()) if valid else 0.0
+
+        yr    = t.year
+        t10_a = top10_yr.get(yr, top10_yr.get(yr - 1, []))
+        t10_a = [a for a in t10_a if a in rets_t.index]
+
+        r = {
+            "FI":     _ew(clf[clf == "FI"].index.tolist()),
+            "FF":     _ew(clf[clf == "FF"].index.tolist()),
+            "Stable": _ew(clf[clf == "NC"].index.tolist()),
+            "Top10":  _ew(t10_a),
+        }
+        rows_perf.append({"date": t, **r})
+        for p in r:
+            cum_vals[p] *= (1 + r[p])
+        rows_cum.append({"date": t, **{p: cum_vals[p] for p in cum_vals}})
+
+    if not rows_perf:
+        return None, None
+
+    return pd.DataFrame(rows_cum), pd.DataFrame(rows_perf)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Données : CryptoStability
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -695,6 +784,84 @@ def update_stability(section):
     children = [stats, dcc.Graph(figure=fig_agg), dcc.Graph(figure=fig_factor)]
     if fig_crix is not None:
         children.append(dcc.Graph(figure=fig_crix))
+
+    # ── Portfolio performance ─────────────────────────────────────────────────
+    try:
+        _broad = pd.read_parquet(
+            Path(r"C:\Users\fkraus\Desktop\DASHBOARD CRYPTO\data\cache\crypto_prices_broad.parquet")
+        )
+        _cum, _perf = _compute_portfolio(result["fi_ff"], _broad)
+        if _cum is not None:
+            _PORT_COLORS = {
+                "FI":     C["red"],
+                "FF":     "#3b82f6",
+                "Stable": C["green"],
+                "Top10":  "#475569",
+            }
+            _PORT_LABELS = {
+                "FI": "Financial Instability",
+                "FF": "Financial Fragility",
+                "Stable": "Stable",
+                "Top10": "Top-10",
+            }
+            # Zones grisées par mois (alternance)
+            _shapes = []
+            _mdates = _cum["date"].tolist()
+            for _i, _m in enumerate(_mdates):
+                if _i % 2 == 0:
+                    _m1 = _mdates[_i + 1] if _i + 1 < len(_mdates) \
+                          else _m + pd.DateOffset(months=1)
+                    _shapes.append(dict(
+                        type="rect", xref="x", yref="paper",
+                        x0=_m, x1=_m1, y0=0, y1=1,
+                        fillcolor="rgba(128,128,128,0.05)",
+                        line_width=0, layer="below",
+                    ))
+
+            fig_port = go.Figure()
+            for _p in ("FI", "FF", "Stable", "Top10"):
+                # customdata : [rendement mensuel formaté]
+                _cdata = [[f"{v:+.1%}"] for v in _perf[_p].values]
+                fig_port.add_trace(go.Scatter(
+                    x=_cum["date"], y=_cum[_p].round(2),
+                    mode="lines",
+                    name=_PORT_LABELS[_p],
+                    line=dict(color=_PORT_COLORS[_p], width=2),
+                    customdata=_cdata,
+                    hovertemplate=(
+                        "%{x|%b %Y} — "
+                        "<b>%{y:.1f}</b> "
+                        "(%{customdata[0]})"
+                        "<extra>" + _PORT_LABELS[_p] + "</extra>"
+                    ),
+                ))
+
+            _fl = _fig_layout(
+                "Portfolio Performance — Cumulative wealth (log scale, base 100)", 380
+            )
+            _fl.pop("yaxis", None)
+            fig_port.update_layout(
+                yaxis=dict(
+                    title="Cumulative wealth",
+                    type="log",
+                    gridcolor=C["border"], linecolor=C["border"],
+                    tickfont=dict(color=C["muted"]),
+                ),
+                hovermode="x unified",
+                shapes=_shapes,
+                legend=dict(orientation="h", y=-0.16),
+                xaxis_range=x_range,
+                annotations=[dict(
+                    text="Equally-weighted portfolios, 1-month forward lag (out-of-sample) · Che et al. (2023)",
+                    xref="paper", yref="paper", x=1, y=-0.14, showarrow=False,
+                    xanchor="right", font=dict(size=10, color=C["muted2"]),
+                )],
+                **_fl,
+            )
+            children.append(dcc.Graph(figure=fig_port))
+    except Exception:
+        pass
+
     return html.Div(children)
 
 
