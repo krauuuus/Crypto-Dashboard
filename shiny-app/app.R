@@ -2,6 +2,7 @@ library(shiny)
 library(plotly)
 library(dplyr)
 library(arrow)
+library(dotenv)
 library(lubridate)
 
 source("pipelines/config.R")
@@ -95,7 +96,7 @@ server <- function(input, output, session) {
     df |>
       filter(date >= cutoff) |>
       mutate(log_ret = log(close / lag(close)),
-             vol_30  = zoo::rollsd(log_ret, 30, fill = NA) * sqrt(252) * 100)
+             vol_30  = zoo::rollapply(log_ret, 30, sd, fill = NA, align = "right") * sqrt(252) * 100)
   })
 
   output$price_chart <- renderPlotly({
