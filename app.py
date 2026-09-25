@@ -657,13 +657,13 @@ def update_stability(section):
     )
 
     # CRIX — indice de marché crypto (type S&P 500 crypto)
-    crix_graph = None
+    import numpy as _np
+    fig_crix = None
     try:
         crix_path = Path(r"C:\Users\fkraus\Desktop\DASHBOARD CRYPTO\data\raw\CRIX_data.csv")
         crix_df   = pd.read_csv(crix_path, sep=";", parse_dates=["date"])
         crix_df   = crix_df.dropna(subset=["price"]).sort_values("date")
         fig_crix  = go.Figure()
-        import numpy as _np
         fig_crix.add_trace(go.Scatter(
             x=crix_df["date"], y=_np.log(crix_df["price"]).round(4),
             mode="lines", line=dict(color=C["accent2"], width=1.5), showlegend=False,
@@ -677,13 +677,24 @@ def update_stability(section):
             )],
             **_fig_layout("CRIX — Crypto Market Index (daily)", 260),
         )
-        crix_graph = dcc.Graph(figure=fig_crix)
     except Exception:
         pass
 
+    # Aligner les axes X sur la plage commune
+    factor_dates = pd.to_datetime(factor_level.index)
+    x_min = min(share["date"].min(), factor_dates.min())
+    x_max = max(share["date"].max(), factor_dates.max())
+    if fig_crix is not None:
+        x_min = min(x_min, crix_df["date"].min())
+        x_max = max(x_max, crix_df["date"].max())
+    x_range = [str(x_min)[:10], str(x_max)[:10]]
+    for fig in ([fig_agg, fig_factor, fig_crix] if fig_crix is not None
+                else [fig_agg, fig_factor]):
+        fig.update_layout(xaxis_range=x_range)
+
     children = [stats, dcc.Graph(figure=fig_agg), dcc.Graph(figure=fig_factor)]
-    if crix_graph is not None:
-        children.append(crix_graph)
+    if fig_crix is not None:
+        children.append(dcc.Graph(figure=fig_crix))
     return html.Div(children)
 
 
