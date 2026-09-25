@@ -487,6 +487,9 @@ def _build_fine_groups(selected_cuts):
     Input("bucket-asset", "value"),
 )
 def update_cut_options(asset):
+    if asset == "BTC":
+        opts = [{"label": v, "value": v} for v in _CUT_THRESHOLDS]
+        return opts, ["$10K", "$100K"]
     opts = [{"label": v, "value": v} for v in _FINE_CUTS]
     return opts, ["$10k", "$100k"]
 
@@ -505,14 +508,80 @@ def update_buckets(asset, selected_cuts):
 
 
 def _update_buckets_inner(asset, selected_cuts):
-    import pandas as pd
+    # BTC → parquet agrégé multi-exchange (toujours à jour)
+    if asset == "BTC":
+        return _update_btc_parquet(selected_cuts)
+    # ETH/XRP/LTC → fine CSV Binance
+    return _update_fine_csv(asset, selected_cuts)
 
+
+def _update_btc_parquet(selected_cuts):
+    _agg_path = Path(__file__).parent / "crypto-research-data" / "bucket_analysis" / "bucket_analysis_BTC.parquet"
+    if not _agg_path.exists():
+        return _error("bucket_analysis_BTC.parquet introuvable.",
+                      "Lance : python -m pipelines.trade_buckets.main --update")
+
+    df = pd.read_parquet(_agg_path)
+    # Exclure la ligne cross_exchange pré-calculée : on la recompute pour couvrir tous les mois
+    df_indiv = df[df["exchange"] != "cross_exchange"].copy()
+
+    # Agrégation volume cross-exchange par mois et bucket
+    rows = []
+    for ym, grp in df_indiv.groupby("year_month"):
+        total_vol = grp["volume_usd"].sum()
+        if total_vol == 0:
+            continue
+        for bucket, bgrp in grp.groupby("bucket"):
+            rows.append({"ym": ym, "bucket": bucket,
+                         "vol_pct": bgrp["volume_usd"].sum() / total_vol * 100})
+    if not rows:
+        return _error("Aucune donnée cross-exchange BTC.")
+
+    df_cross = pd.DataFrame(rows)
+    pivoted  = df_cross.pivot_table(index="ym", columns="bucket",
+                                    values="vol_pct").reset_index().sort_values("ym")
+    x_vals   = pivoted["ym"].tolist()
+    groups   = _build_groups(selected_cuts)
+
+    last_row = pivoted.iloc[-1]
+    b1 = float(last_row.get("B1_micro_retail", 0) or 0)
+    b2 = float(last_row.get("B2_retail", 0) or 0)
+    b4 = float(last_row.get("B4_institutional", 0) or 0)
+    b5 = float(last_row.get("B5_whale", 0) or 0)
+    n_exch = df_indiv[df_indiv["year_month"] == x_vals[-1]]["exchange"].nunique()
+    stats = html.Div(style={"display": "flex", "gap": "12px",
+                             "marginBottom": "20px", "flexWrap": "wrap"}, children=[
+        card_stat("< $10K",  f"{b1 + b2:.1f}%",  "#3b82f6"),
+        card_stat("> $100K", f"{b4 + b5:.1f}%",  C["yellow"]),
+        card_stat("> $1M",   f"{b5:.1f}%",        C["red"]),
+        card_stat("Période", x_vals[-1],           C["muted2"]),
+        card_stat("Source",  f"Cross-exchange ({n_exch} exchanges)", C["muted2"]),
+    ])
+
+    def _area(x, y, name, color):
+        return go.Scatter(x=x, y=y, name=name, mode="lines",
+                          stackgroup="one", fillcolor=color,
+                          line=dict(color=color, width=0.5))
+
+    fig_v = go.Figure()
+    for g in groups:
+        valid = [b for b in g["buckets"] if b in pivoted.columns]
+        y_vals = pivoted[valid].sum(axis=1).fillna(0).tolist() if valid else [0]*len(x_vals)
+        fig_v.add_trace(_area(x_vals, y_vals, g["label"], g["color"]))
+
+    fig_v.update_layout(legend=dict(orientation="h", y=-0.25),
+                        yaxis_title="Share (%)", yaxis_range=[0, 100],
+                        xaxis_type="category",
+                        **_fig_layout("BTC — Trade-size composition (cross-exchange)", 380))
+    return html.Div([stats, dcc.Graph(figure=fig_v)])
+
+
+def _update_fine_csv(asset, selected_cuts):
     df_raw = pd.read_csv(_FINE_CSV, encoding="utf-8-sig")
     df_raw = df_raw[df_raw["symbol"] == _FINE_SYM.get(asset, "")].copy()
     if df_raw.empty:
         return _info(f"Aucune donnée pour {asset} sur Binance.",
-                     "Symboles disponibles : BTC, ETH, XRP, LTC.")
-    df_raw["ym"] = df_raw["ym"]
+                     "Symboles disponibles : ETH, XRP, LTC.")
     groups  = _build_fine_groups(selected_cuts)
     x_vals  = sorted(df_raw["ym"].unique())
     agg_frames = []
@@ -522,8 +591,7 @@ def _update_buckets_inner(asset, selected_cuts):
         sub["vol_grp"] = sub[valid_cols].sum(axis=1)
         sub["volume_share_pct"] = sub["vol_grp"] / sub["total_usd_volume"] * 100
         sub["group_label"] = g["label"]
-        sub["color"]       = g["color"]
-        agg_frames.append(sub[["ym", "volume_share_pct", "group_label", "color"]])
+        agg_frames.append(sub[["ym", "volume_share_pct", "group_label"]])
     df_agg = pd.concat(agg_frames, ignore_index=True)
 
     last_ym   = df_raw["ym"].max()
@@ -536,7 +604,6 @@ def _update_buckets_inner(asset, selected_cuts):
     small_pct = last_data[small_cols].sum().sum() / tot * 100 if tot else 0
     large_pct = last_data[large_cols].sum().sum() / tot * 100 if tot else 0
     top_pct   = last_data[whale_cols].sum().sum() / tot * 100 if tot else 0
-    data_label = f"Binance · {len(df_raw)} mois"
 
     stats = html.Div(style={"display": "flex", "gap": "12px",
                              "marginBottom": "20px", "flexWrap": "wrap"}, children=[
@@ -544,14 +611,13 @@ def _update_buckets_inner(asset, selected_cuts):
         card_stat("> $100K", f"{large_pct:.1f}%",  C["yellow"]),
         card_stat("> $1M",   f"{top_pct:.1f}%",    C["red"]),
         card_stat("Période", last_ym,               C["muted2"]),
-        card_stat("Source",  data_label,            C["muted2"]),
+        card_stat("Source",  f"Binance · {len(df_raw)} mois", C["muted2"]),
     ])
 
-    def _area(x, y, name, color, showlegend=True):
+    def _area(x, y, name, color):
         return go.Scatter(x=x, y=y, name=name, mode="lines",
                           stackgroup="one", fillcolor=color,
-                          line=dict(color=color, width=0.5),
-                          showlegend=showlegend)
+                          line=dict(color=color, width=0.5))
 
     fig_v = go.Figure()
     for g in groups:
