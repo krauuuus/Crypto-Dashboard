@@ -239,11 +239,43 @@ def load_returns(force_refresh: bool = False) -> pd.DataFrame:
 # Top-N symboles pour la stability (hors stablecoins)
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _symbols_from_list_xlsx() -> list[str]:
+    """
+    Lit list.xlsx (Feuil1) + cryptocategories.xlsx (stablecoins_list) depuis le
+    dossier recherche local.  Retourne le top-40 par année, union unique, sans stablecoins.
+    Retourne [] si les fichiers ne sont pas trouvés.
+    """
+    import os
+    list_path   = Path(r"C:\Users\fkraus\Desktop\Recherche\CryptoStability\data\raw\list.xlsx")
+    stable_path = Path(r"C:\Users\fkraus\Desktop\Recherche\CryptoStability\data\raw\cryptocategories.xlsx")
+    if not list_path.exists() or not stable_path.exists():
+        return []
+    try:
+        st = pd.read_excel(stable_path, sheet_name="stablecoins_list")
+        stablecoins = set(st["ID"].dropna().astype(str).str.strip().str.upper())
+        feuil1 = pd.read_excel(list_path, sheet_name="Feuil1", header=0)
+        unique: list[str] = []
+        seen: set[str] = set()
+        for col in feuil1.columns:
+            syms = [str(s).strip().upper() for s in feuil1[col].dropna().tolist()]
+            filtered = [s for s in syms
+                        if s not in stablecoins and s.isascii() and s.isalpha()][:40]
+            for s in filtered:
+                if s not in seen:
+                    seen.add(s)
+                    unique.append(s)
+        log.info(f"get_stability_symbols : {len(unique)} symboles depuis list.xlsx")
+        return unique
+    except Exception as e:
+        log.warning(f"_symbols_from_list_xlsx : échec ({e})")
+        return []
+
+
 def get_stability_symbols(n: int = 100) -> list[str]:
     """
-    Retourne les n plus grosses cryptos hors stablecoins d'après CoinMarketCap.
-    Cache JSON hebdomadaire (la liste évolue lentement).
-    Fallback : CRYPTO_BASKET si pas de clé CMC.
+    Retourne la liste de cryptos pour la pipeline de stabilité.
+    Priorité : (1) list.xlsx local, (2) CoinMarketCap, (3) CRYPTO_BASKET.
+    Cache JSON hebdomadaire.
     """
     if _SYMBOLS_CACHE.exists():
         meta = json.loads(_SYMBOLS_CACHE.read_text())
@@ -252,6 +284,16 @@ def get_stability_symbols(n: int = 100) -> list[str]:
                  ).total_seconds() / 3600
         if age_h < _SYMBOLS_TTL_H and len(meta.get("symbols", [])) >= n:
             return meta["symbols"][:n]
+
+    # Priorité 1 : list.xlsx local (recherche)
+    xlsx_syms = _symbols_from_list_xlsx()
+    if xlsx_syms:
+        _SYMBOLS_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        _SYMBOLS_CACHE.write_text(json.dumps({
+            "fetched_at": datetime.datetime.now().isoformat(timespec="seconds"),
+            "symbols": xlsx_syms,
+        }))
+        return xlsx_syms[:n] if n < len(xlsx_syms) else xlsx_syms
 
     if not COINMARKETCAP_API_KEY:
         log.warning("get_stability_symbols : COINMARKETCAP_API_KEY manquante, fallback CRYPTO_BASKET")

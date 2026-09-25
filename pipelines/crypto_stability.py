@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 
 CACHE_FILE  = ROOT / "data" / "cache" / "crypto_stability.parquet"
 _CACHE_META = ROOT / "data" / "cache" / "crypto_stability_meta.json"
-CACHE_TTL_H = 24
+CACHE_TTL_H = 168  # 7 jours — QR rolling prend ~5 min, inutile de relancer chaque jour
 
 # Paramètres du modèle
 WINDOW_MONTHS  = 18
@@ -214,10 +214,11 @@ def _inv_small(A: np.ndarray) -> np.ndarray:
 
 def _qr_noblas(X: np.ndarray, y: np.ndarray, tau: float,
                max_iter: int = 60, tol: float = 1e-5):
-    """Quantile regression via IRLS — pas de BLAS (p petit, typiquement 4).
+    """Quantile regression via IRLS — pas de BLAS (p petit, typiquement 2).
 
-    Retourne (beta, se) : vecteurs de longueur p.
-    SE estimée via sqrt(tau*(1-tau) * diag((X'WX)^{-1})).
+    Coefficients : IRLS (Koenker & d'Orey 1987).
+    SE : estimateur iid par densité noyau (Koenker 2005, §3.4.2) — corrige
+         le bug X'WX qui donnait des SEs ~100x trop petites.
     """
     n, p = X.shape
     beta = np.zeros(p)
@@ -225,13 +226,11 @@ def _qr_noblas(X: np.ndarray, y: np.ndarray, tau: float,
 
     w = np.ones(n)
     for _ in range(max_iter):
-        # Résidus
         fitted = np.sum(X * beta[np.newaxis, :], axis=1)
         u = y - fitted
         abs_u = np.maximum(np.abs(u), 1e-8)
         w = np.where(u >= 0, tau / abs_u, (1.0 - tau) / abs_u)
 
-        # Equations normales WLS (p×p element-wise)
         A_mat = np.zeros((p, p))
         b_vec = np.zeros(p)
         for i in range(p):
@@ -248,16 +247,24 @@ def _qr_noblas(X: np.ndarray, y: np.ndarray, tau: float,
             break
         beta = beta_new
 
-    # Recalcule A à la convergence pour SE
-    A_conv = np.zeros((p, p))
+    # SE iid : sqrt(τ(1-τ)) / f̂(0) * sqrt(diag((X'X)^{-1}))
+    # f̂(0) estimé par kernel gaussien (Silverman bandwidth)
+    u_final = y - np.sum(X * beta[np.newaxis, :], axis=1)
+    s_u = float(np.std(u_final, ddof=1)) + 1e-10
+    bw   = 1.06 * s_u * (n ** (-0.2))          # Silverman
+    z    = u_final / bw
+    f0   = float(np.mean(np.exp(-0.5 * z * z) / (bw * 2.5066282746310002)))
+    f0   = max(f0, 1e-10)
+
+    XtX = np.zeros((p, p))
     for i in range(p):
-        wxi = w * X[:, i]
         for j in range(i, p):
-            v = float(np.sum(wxi * X[:, j]))
-            A_conv[i, j] = v
-            A_conv[j, i] = v
-    A_inv = _inv_small(A_conv)
-    se = np.sqrt(np.maximum(tau * (1.0 - tau) * np.diag(A_inv), 0.0))
+            v = float(np.sum(X[:, i] * X[:, j]))
+            XtX[i, j] = v
+            XtX[j, i] = v
+    XtX_inv = _inv_small(XtX)
+
+    se = (np.sqrt(tau * (1.0 - tau)) / f0) * np.sqrt(np.maximum(np.diag(XtX_inv), 0.0))
 
     return beta, se
 
