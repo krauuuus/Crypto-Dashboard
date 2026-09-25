@@ -548,14 +548,12 @@ def _update_btc_parquet(selected_cuts):
     b2 = float(last_row.get("B2_retail", 0) or 0)
     b4 = float(last_row.get("B4_institutional", 0) or 0)
     b5 = float(last_row.get("B5_whale", 0) or 0)
-    n_exch = df_indiv[df_indiv["year_month"] == x_vals[-1]]["exchange"].nunique()
     stats = html.Div(style={"display": "flex", "gap": "12px",
                              "marginBottom": "20px", "flexWrap": "wrap"}, children=[
         card_stat("< $10K",  f"{b1 + b2:.1f}%",  "#3b82f6"),
         card_stat("> $100K", f"{b4 + b5:.1f}%",  C["yellow"]),
         card_stat("> $1M",   f"{b5:.1f}%",        C["red"]),
         card_stat("Période", x_vals[-1],           C["muted2"]),
-        card_stat("Source",  f"Cross-exchange ({n_exch} exchanges)", C["muted2"]),
     ])
 
     def _area(x, y, name, color):
