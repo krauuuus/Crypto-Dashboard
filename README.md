@@ -44,36 +44,6 @@ Based on Che et al. (2023). For each asset and each 18-month rolling window:
 └── start.sh                        # Startup script (clones data repo, starts gunicorn)
 ```
 
-## Setup
-
-### Python (Dash)
-
-```bash
-# Create environment
-conda create -n finance-dashboard python=3.12
-conda activate finance-dashboard
-pip install -r requirements.txt
-
-# Configure API keys
-cp .env.example .env   # then fill in your keys
-```
-
-Required keys in `.env`:
-```
-COINMARKETCAP_API_KEY=...
-CRYPTOCOMPARE_API_KEY=...
-JEV_API_KEY=...
-```
-
-### R (Shiny)
-
-```r
-install.packages(c(
-  "shiny", "plotly", "dplyr", "arrow", "lubridate",
-  "quantreg", "rugarch", "zoo", "dfms", "dotenv"
-))
-```
-
 ## Running the pipelines
 
 ```bash
